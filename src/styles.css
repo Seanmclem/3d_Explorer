@@ -101,7 +101,7 @@ button:disabled {
 }
 
 .accordion-content {
-  padding: 0 14px 14px;
+  padding: 5px 14px 14px;
 }
 
 .accordion-content[hidden] {
@@ -233,7 +233,7 @@ h3 {
 }
 
 .library-content .library-meta {
-  padding: 0 14px 10px;
+  padding: 5px 14px 10px;
 }
 
 .asset-list {
