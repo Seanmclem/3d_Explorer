@@ -60,14 +60,52 @@ button:disabled {
   background: #151915;
 }
 
-.panel-section,
-.inspector-section {
-  padding: 14px;
+.accordion-section {
   border-bottom: 1px solid #2f3933;
 }
 
-.intro {
-  padding-top: 18px;
+.accordion-header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  border: 0;
+  border-radius: 0;
+  padding: 11px 14px;
+  color: #dce9e1;
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.accordion-header:hover {
+  color: #ffffff;
+  background: #1b211d;
+}
+
+.accordion-caret {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 140ms ease;
+}
+
+.accordion-section.is-collapsed .accordion-caret {
+  transform: rotate(-45deg);
+}
+
+.accordion-content {
+  padding: 0 14px 14px;
+}
+
+.accordion-content[hidden] {
+  display: none !important;
 }
 
 .eyebrow {
@@ -174,11 +212,32 @@ h3 {
   display: flex;
   justify-content: space-between;
   gap: 12px;
+  padding-bottom: 10px;
   color: #c2d4c9;
   font-size: 0.78rem;
 }
 
+.library-accordion {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.library-content {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  padding: 0;
+}
+
+.library-content .library-meta {
+  padding: 0 14px 10px;
+}
+
 .asset-list {
+  flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 8px;
@@ -340,7 +399,6 @@ h3 {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   padding: 14px;
-  border-bottom: 1px solid #2f3933;
 }
 
 .stats-grid div {
@@ -376,6 +434,12 @@ h3 {
 .section-title-row button {
   min-width: 70px;
   min-height: 32px;
+}
+
+.section-title {
+  color: #c2d4c9;
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 .clip-list {

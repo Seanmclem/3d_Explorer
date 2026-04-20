@@ -12,33 +12,58 @@ if (!app) {
 app.innerHTML = `
   <main class="shell">
     <aside class="library-panel" aria-label="Asset library">
-      <section class="panel-section intro">
-        <p class="eyebrow">Local GLB and glTF lab</p>
-        <h1>Model viewer</h1>
-        <p class="summary">Load folders, inspect assets, test animation clips, and tune the camera without uploading files anywhere.</p>
+      <section class="accordion-section intro" data-accordion="overview">
+        <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-overview">
+          <span>Overview</span>
+          <span class="accordion-caret" aria-hidden="true"></span>
+        </button>
+        <div class="accordion-content" id="accordion-overview">
+          <p class="eyebrow">Local GLB and glTF lab</p>
+          <h1>Model viewer</h1>
+          <p class="summary">Load folders, inspect assets, test animation clips, and tune the camera without uploading files anywhere.</p>
+        </div>
       </section>
 
-      <section class="panel-section import-actions" aria-label="Import controls">
-        <button class="primary-action" id="pickFolder" type="button">Open editable folder</button>
-        <label class="secondary-action" for="folderInput">Import folder</label>
-        <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
-        <button class="secondary-action" id="pickFiles" type="button">Open files</button>
-        <label class="secondary-action" for="fileInput">Import files</label>
-        <input id="fileInput" type="file" accept=".glb,.gltf,.bin,image/*,.ktx2,.basis,.dds" multiple hidden />
-        <button class="secondary-action" id="clearLibrary" type="button">Clear</button>
+      <section class="accordion-section" data-accordion="files">
+        <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-files">
+          <span>Files</span>
+          <span class="accordion-caret" aria-hidden="true"></span>
+        </button>
+        <div class="accordion-content import-actions" id="accordion-files">
+          <button class="primary-action" id="pickFolder" type="button">Open editable folder</button>
+          <label class="secondary-action" for="folderInput">Import folder</label>
+          <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+          <button class="secondary-action" id="pickFiles" type="button">Open files</button>
+          <label class="secondary-action" for="fileInput">Import files</label>
+          <input id="fileInput" type="file" accept=".glb,.gltf,.bin,image/*,.ktx2,.basis,.dds" multiple hidden />
+          <button class="secondary-action" id="clearLibrary" type="button">Clear</button>
+        </div>
       </section>
 
-      <section class="panel-section">
-        <label class="field-label" for="assetSearch">Search assets</label>
-        <input class="text-field" id="assetSearch" type="search" placeholder="robot, idle, character..." />
+      <section class="accordion-section" data-accordion="search">
+        <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-search">
+          <span>Search</span>
+          <span class="accordion-caret" aria-hidden="true"></span>
+        </button>
+        <div class="accordion-content" id="accordion-search">
+          <label class="field-label" for="assetSearch">Search assets</label>
+          <input class="text-field" id="assetSearch" type="search" placeholder="robot, idle, character..." />
+        </div>
       </section>
 
-      <section class="panel-section library-meta" aria-live="polite">
-        <span id="assetCount">0 models</span>
-        <span id="fileCount">0 files indexed</span>
+      <section class="accordion-section library-accordion" data-accordion="models">
+        <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-models">
+          <span>Models</span>
+          <span class="accordion-caret" aria-hidden="true"></span>
+        </button>
+        <div class="accordion-content library-content" id="accordion-models">
+          <div class="library-meta" aria-live="polite">
+            <span id="assetCount">0 models</span>
+            <span id="fileCount">0 files indexed</span>
+          </div>
+          <section class="asset-list" id="assetList" aria-label="Available models"></section>
+        </div>
       </section>
-
-      <section class="asset-list" id="assetList" aria-label="Available models"></section>
     </aside>
 
     <section class="viewport-region" aria-label="3D viewport">
@@ -62,35 +87,52 @@ app.innerHTML = `
       </div>
 
       <aside class="inspector-panel" aria-label="Model inspector">
-        <section class="inspector-section">
-          <p class="eyebrow">Selected</p>
-          <h2 id="selectedName">No model loaded</h2>
-          <p id="selectedPath">Pick a GLB or glTF file to begin.</p>
+        <section class="accordion-section" data-accordion="selected">
+          <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-selected">
+            <span>Selected</span>
+            <span class="accordion-caret" aria-hidden="true"></span>
+          </button>
+          <div class="accordion-content" id="accordion-selected">
+            <h2 id="selectedName">No model loaded</h2>
+            <p id="selectedPath">Pick a GLB or glTF file to begin.</p>
+          </div>
         </section>
 
-        <section class="stats-grid" id="statsGrid" aria-label="Model stats">
-          <div><span>Meshes</span><strong>0</strong></div>
-          <div><span>Materials</span><strong>0</strong></div>
-          <div><span>Textures</span><strong>0</strong></div>
-          <div><span>Triangles</span><strong>0</strong></div>
-          <div><span>Vertices</span><strong>0</strong></div>
-          <div><span>Bounds</span><strong>0 x 0 x 0</strong></div>
+        <section class="accordion-section" data-accordion="stats">
+          <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-stats">
+            <span>Stats</span>
+            <span class="accordion-caret" aria-hidden="true"></span>
+          </button>
+          <div class="accordion-content stats-grid" id="statsGrid" aria-label="Model stats">
+            <div><span>Meshes</span><strong>0</strong></div>
+            <div><span>Materials</span><strong>0</strong></div>
+            <div><span>Textures</span><strong>0</strong></div>
+            <div><span>Triangles</span><strong>0</strong></div>
+            <div><span>Vertices</span><strong>0</strong></div>
+            <div><span>Bounds</span><strong>0 x 0 x 0</strong></div>
+          </div>
         </section>
 
-        <section class="inspector-section">
-          <div class="section-title-row">
-            <h3>Animations</h3>
-            <button id="togglePlay" type="button">Play</button>
+        <section class="accordion-section" data-accordion="animations">
+          <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-animations">
+            <span>Animations</span>
+            <span class="accordion-caret" aria-hidden="true"></span>
+          </button>
+          <div class="accordion-content" id="accordion-animations">
+            <div class="section-title-row">
+              <span class="section-title">Clips</span>
+              <button id="togglePlay" type="button">Play</button>
+            </div>
+            <div class="clip-list" id="clipList"></div>
+            <label class="field-label" for="timeline">Timeline</label>
+            <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
+            <div class="time-row">
+              <span id="clipTime">0.00s</span>
+              <span id="clipDuration">0.00s</span>
+            </div>
+            <label class="field-label" for="speed">Playback speed</label>
+            <input id="speed" type="range" min="0" max="2" step="0.05" value="1" />
           </div>
-          <div class="clip-list" id="clipList"></div>
-          <label class="field-label" for="timeline">Timeline</label>
-          <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
-          <div class="time-row">
-            <span id="clipTime">0.00s</span>
-            <span id="clipDuration">0.00s</span>
-          </div>
-          <label class="field-label" for="speed">Playback speed</label>
-          <input id="speed" type="range" min="0" max="2" step="0.05" value="1" />
         </section>
       </aside>
     </section>
@@ -135,25 +177,37 @@ let currentPlayback: PlaybackState = {
 };
 let isScrubbing = false;
 
+initAccordions();
+
 if (supportsDirectoryPicker()) {
   pickFolderButton.title = "Uses the File System Access API and keeps file handles for future edits.";
 } else {
-  pickFolderButton.disabled = true;
-  pickFolderButton.title = "Use Import folder in this browser.";
+  pickFolderButton.title = "Falls back to folder upload in this browser.";
 }
 
 if (supportsFilePicker()) {
   pickFilesButton.title = "Uses the File System Access API and keeps file handles for future edits.";
 } else {
-  pickFilesButton.disabled = true;
-  pickFilesButton.title = "Use Import files in this browser.";
+  pickFilesButton.title = "Falls back to file upload in this browser.";
 }
 
 pickFolderButton.addEventListener("click", async () => {
+  if (!supportsDirectoryPicker()) {
+    alertFileSystemAccessFallback("folder");
+    folderInput.click();
+    return;
+  }
+
   await runImport(async () => library.addDirectoryFromPicker(), "Editable folder opened");
 });
 
 pickFilesButton.addEventListener("click", async () => {
+  if (!supportsFilePicker()) {
+    alertFileSystemAccessFallback("files");
+    fileInput.click();
+    return;
+  }
+
   await runImport(async () => library.addFilesFromPicker(), "Editable files opened");
 });
 
@@ -269,6 +323,9 @@ async function runImport(action: () => Promise<number> | number, successLabel: s
     const count = await action();
     renderAssets();
     setStatus({ label: successLabel, detail: `${count} files added`, tone: "ok" });
+    if (count > 0) {
+      setAccordionExpanded("files", false);
+    }
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       setStatus({ label: "Folder selection canceled", tone: "idle" });
@@ -281,6 +338,29 @@ async function runImport(action: () => Promise<number> | number, successLabel: s
       tone: "error"
     });
   }
+}
+
+function initAccordions(): void {
+  for (const section of Array.from(document.querySelectorAll<HTMLElement>("[data-accordion]"))) {
+    const header = section.querySelector<HTMLButtonElement>(".accordion-header");
+    const content = section.querySelector<HTMLElement>(".accordion-content");
+    if (!header || !content) continue;
+
+    header.addEventListener("click", () => {
+      setAccordionExpanded(section.dataset.accordion ?? "", header.getAttribute("aria-expanded") !== "true");
+    });
+  }
+}
+
+function setAccordionExpanded(name: string, expanded: boolean): void {
+  const section = document.querySelector<HTMLElement>(`[data-accordion="${name}"]`);
+  const header = section?.querySelector<HTMLButtonElement>(".accordion-header");
+  const content = section?.querySelector<HTMLElement>(".accordion-content");
+  if (!section || !header || !content) return;
+
+  section.classList.toggle("is-collapsed", !expanded);
+  header.setAttribute("aria-expanded", String(expanded));
+  content.hidden = !expanded;
 }
 
 function renderAssets(): void {
@@ -439,6 +519,18 @@ function wireToggle(selector: string, callback: (enabled: boolean) => void, init
 function setStatus(status: LoadStatus): void {
   statusChip.dataset.tone = status.tone ?? "idle";
   statusChip.textContent = status.detail ? `${status.label}: ${status.detail}` : status.label;
+}
+
+function alertFileSystemAccessFallback(kind: "folder" | "files"): void {
+  const target = kind === "folder" ? "folders" : "files";
+  window.alert(
+    `This browser does not support editable ${target} through the File System Access API yet. Falling back to upload mode. You can still preview assets, but future edit/save features will need an editable browser picker.`
+  );
+  setStatus({
+    label: "Upload fallback",
+    detail: "preview works, editable handles are unavailable",
+    tone: "warn"
+  });
 }
 
 function escapeHtml(value: string): string {
