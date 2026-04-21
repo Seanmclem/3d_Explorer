@@ -36,9 +36,53 @@ export type ModelStats = {
   bounds: string;
 };
 
+export type MaterialInspectorInfo = {
+  index: number;
+  name: string;
+  type: string;
+  color?: string;
+  opacity?: number;
+  metalness?: number;
+  roughness?: number;
+  transparent: boolean;
+  side: string;
+  textureSlots: string[];
+  vertexColors: boolean;
+};
+
+export type NodeInspectorInfo = {
+  id: number;
+  depth: number;
+  name: string;
+  type: string;
+  visible: boolean;
+  childCount: number;
+  tags: string[];
+  transform: string[];
+  geometry?: {
+    name: string;
+    vertices: number;
+    attributes: string[];
+    indexed: boolean;
+  };
+  materials: MaterialInspectorInfo[];
+};
+
+export type GeometrySelectionInfo = {
+  nodeId: number;
+  nodeName: string;
+  materialIndex: number;
+  materialName: string;
+  islandIndex: number;
+  islandCount: number;
+  faceCount: number;
+  vertexCount: number;
+};
+
 export type LoadedModel = {
   clips: AnimationClip[];
   stats: ModelStats;
+  nodes: NodeInspectorInfo[];
 };
 
 export type PlaybackState = {

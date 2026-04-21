@@ -310,33 +310,6 @@ h3 {
   cursor: grabbing;
 }
 
-.drop-target {
-  position: absolute;
-  left: 18px;
-  bottom: 18px;
-  display: grid;
-  max-width: 360px;
-  gap: 4px;
-  border: 1px solid #3d4942;
-  border-radius: 8px;
-  padding: 10px 12px;
-  color: #dce9e1;
-  background: rgba(16, 18, 16, 0.78);
-  pointer-events: auto;
-}
-
-.drop-target span {
-  color: #a8b9af;
-  font-size: 0.78rem;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.drop-target.is-over {
-  border-color: #19c37d;
-  background: rgba(23, 53, 39, 0.9);
-}
-
 .status-chip {
   position: absolute;
   top: 16px;
@@ -392,6 +365,7 @@ h3 {
   border-left: 1px solid #2f3933;
   background: rgba(21, 25, 21, 0.93);
   backdrop-filter: blur(10px);
+  overflow: auto;
 }
 
 .stats-grid {
@@ -420,6 +394,208 @@ h3 {
 .stats-grid strong {
   overflow-wrap: anywhere;
   font-size: 0.92rem;
+}
+
+.node-list {
+  display: grid;
+  gap: 8px;
+}
+
+.node-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.geometry-selection-card {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #315943;
+  border-radius: 8px;
+  padding: 10px;
+  background: #12231a;
+}
+
+.geometry-selection-card strong,
+.geometry-selection-card span {
+  overflow-wrap: anywhere;
+}
+
+.geometry-selection-card span {
+  color: #a8b9af;
+  font-size: 0.78rem;
+}
+
+.geometry-selection-card button {
+  width: fit-content;
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: 0.78rem;
+}
+
+.selection-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.selection-stats span {
+  border: 1px solid #315943;
+  border-radius: 8px;
+  padding: 4px 7px;
+  background: #0f1813;
+  font-weight: 800;
+}
+
+.node-summary span,
+.node-tags span {
+  border: 1px solid #313b35;
+  border-radius: 8px;
+  padding: 4px 7px;
+  color: #c2d4c9;
+  background: #111511;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.node-item {
+  border: 1px solid #313b35;
+  border-radius: 8px;
+  background: #111511;
+}
+
+.node-item.is-node-hidden {
+  opacity: 0.62;
+}
+
+.node-item summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 36px;
+  padding: 8px 9px 8px calc(9px + var(--node-indent, 0px));
+  cursor: pointer;
+}
+
+.node-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 800;
+}
+
+.node-type {
+  color: #a8b9af;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.node-details {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #26302a;
+  padding: 9px;
+}
+
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.node-actions button {
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: 0.78rem;
+}
+
+.node-actions button[aria-pressed="true"] {
+  border-color: #19c37d;
+  background: #173527;
+}
+
+.node-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.node-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #a8b9af;
+  font-size: 0.76rem;
+}
+
+.node-detail-row strong {
+  color: #e9f3ed;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.node-transform {
+  margin: 0;
+  padding-left: 16px;
+  color: #a8b9af;
+  font-size: 0.76rem;
+}
+
+.node-materials {
+  display: grid;
+  gap: 7px;
+}
+
+.material-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  --swatch: #6e7a72;
+}
+
+.material-swatch {
+  width: 18px;
+  height: 18px;
+  border: 1px solid #5a6a60;
+  border-radius: 6px;
+  background: var(--swatch);
+}
+
+.material-row strong,
+.material-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.material-row span {
+  color: #a8b9af;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.material-color-edit {
+  display: grid;
+  grid-template-columns: auto 34px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  margin-top: 7px;
+  color: #c2d4c9;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.material-color-edit input[type="color"] {
+  width: 34px;
+  height: 26px;
+  border: 1px solid #3d4942;
+  border-radius: 6px;
+  padding: 0;
+  background: #0f120f;
+}
+
+.material-hex {
+  overflow-wrap: anywhere;
 }
 
 .section-title-row,
@@ -521,13 +697,6 @@ input[type="range"] {
     top: 64px;
   }
 
-  .drop-target {
-    left: 14px;
-    right: 14px;
-    width: calc(100vw - 28px);
-    bottom: calc(46% + 14px);
-    max-width: none;
-  }
 }
 
 @media (max-width: 520px) {

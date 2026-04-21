@@ -1,7 +1,15 @@
 import "./styles.css";
 import { GltfViewer } from "./viewer";
 import { LocalAssetLibrary, supportsDirectoryPicker, supportsFilePicker } from "./localAssets";
-import type { LoadedModel, LoadStatus, LocalAsset, ModelStats, PlaybackState } from "./types";
+import type {
+  GeometrySelectionInfo,
+  LoadedModel,
+  LoadStatus,
+  LocalAsset,
+  ModelStats,
+  NodeInspectorInfo,
+  PlaybackState
+} from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -69,11 +77,6 @@ app.innerHTML = `
     <section class="viewport-region" aria-label="3D viewport">
       <canvas id="viewerCanvas"></canvas>
 
-      <div class="drop-target" id="dropTarget">
-        <strong>Drop folders or files</strong>
-        <span>GLB loads directly. glTF sidecars work when they come from the same folder selection.</span>
-      </div>
-
       <div class="status-chip" id="statusChip">Ready</div>
 
       <div class="toolbar" aria-label="Viewport controls">
@@ -113,6 +116,14 @@ app.innerHTML = `
           </div>
         </section>
 
+        <section class="accordion-section" data-accordion="nodes">
+          <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-nodes">
+            <span>Nodes</span>
+            <span class="accordion-caret" aria-hidden="true"></span>
+          </button>
+          <div class="accordion-content node-list" id="nodeList" aria-label="GLTF nodes"></div>
+        </section>
+
         <section class="accordion-section" data-accordion="animations">
           <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-animations">
             <span>Animations</span>
@@ -141,9 +152,25 @@ app.innerHTML = `
 
 const library = new LocalAssetLibrary();
 const canvas = query<HTMLCanvasElement>("#viewerCanvas");
+let currentGeometrySelection: GeometrySelectionInfo | null = null;
 const viewer = new GltfViewer({
   canvas,
-  onPlayback: updatePlayback
+  onPlayback: updatePlayback,
+  onGeometrySelection: (selection) => {
+    const hadSelection = currentGeometrySelection != null;
+    currentGeometrySelection = selection;
+    renderGeometrySelection();
+    if (selection) {
+      setAccordionExpanded("nodes", true);
+      setStatus({
+        label: "Geometry island selected",
+        detail: `${selection.materialName}, ${selection.faceCount} faces`,
+        tone: "ok"
+      });
+    } else if (hadSelection) {
+      setStatus({ label: "Geometry selection cleared", tone: "idle" });
+    }
+  }
 });
 
 const pickFolderButton = query<HTMLButtonElement>("#pickFolder");
@@ -155,11 +182,12 @@ const assetSearch = query<HTMLInputElement>("#assetSearch");
 const assetList = query<HTMLElement>("#assetList");
 const assetCount = query<HTMLElement>("#assetCount");
 const fileCount = query<HTMLElement>("#fileCount");
-const dropTarget = query<HTMLElement>("#dropTarget");
+const dropTarget = query<HTMLElement>(".viewport-region");
 const statusChip = query<HTMLElement>("#statusChip");
 const selectedName = query<HTMLElement>("#selectedName");
 const selectedPath = query<HTMLElement>("#selectedPath");
 const statsGrid = query<HTMLElement>("#statsGrid");
+const nodeList = query<HTMLElement>("#nodeList");
 const clipList = query<HTMLElement>("#clipList");
 const togglePlayButton = query<HTMLButtonElement>("#togglePlay");
 const timeline = query<HTMLInputElement>("#timeline");
@@ -229,11 +257,69 @@ clearLibraryButton.addEventListener("click", () => {
   selectedPath.textContent = "Pick a GLB or glTF file to begin.";
   renderAssets();
   renderStats();
+  renderNodes([]);
   renderClips([]);
   setStatus({ label: "Library cleared", tone: "idle" });
 });
 
 assetSearch.addEventListener("input", renderAssets);
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-node-action]");
+  if (!button) return;
+
+  const nodeId = Number(button.dataset.nodeId);
+  if (!Number.isFinite(nodeId)) return;
+
+  if (button.dataset.nodeAction === "visible") {
+    const isVisible = button.getAttribute("aria-pressed") === "true";
+    const nextVisible = !isVisible;
+    if (!viewer.setNodeVisible(nodeId, nextVisible)) return;
+
+    button.setAttribute("aria-pressed", String(nextVisible));
+    button.textContent = nextVisible ? "Hide" : "Show";
+    button.closest(".node-item")?.classList.toggle("is-node-hidden", !nextVisible);
+    setStatus({ label: nextVisible ? "Node shown" : "Node hidden", tone: "idle" });
+  }
+
+  if (button.dataset.nodeAction === "highlight") {
+    const isHighlighted = button.getAttribute("aria-pressed") === "true";
+    const nextHighlighted = !isHighlighted;
+    if (!viewer.setNodeHighlighted(nodeId, nextHighlighted)) return;
+
+    button.setAttribute("aria-pressed", String(nextHighlighted));
+    setStatus({ label: nextHighlighted ? "Node highlighted" : "Highlight removed", tone: "idle" });
+  }
+});
+
+nodeList.addEventListener("input", (event) => {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || input.dataset.nodeAction !== "color") return;
+
+  const nodeId = Number(input.dataset.nodeId);
+  const materialIndex = Number(input.dataset.materialIndex);
+  if (!Number.isFinite(nodeId) || !Number.isFinite(materialIndex)) return;
+
+    if (!viewer.setMaterialColor(nodeId, materialIndex, input.value)) return;
+
+  const row = input.closest<HTMLElement>(".material-row");
+  row?.querySelector<HTMLElement>(".material-swatch")?.style.setProperty("--swatch", input.value);
+  const hexLabel = row?.querySelector<HTMLElement>(".material-hex");
+  if (hexLabel) hexLabel.textContent = input.value;
+});
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-selection-action]");
+  if (!button) return;
+
+  if (button.dataset.selectionAction === "clear") {
+    viewer.clearGeometrySelection();
+  }
+});
 
 dropTarget.addEventListener("dragover", (event) => {
   event.preventDefault();
@@ -309,6 +395,7 @@ window.addEventListener("beforeunload", () => {
 
 renderAssets();
 renderStats();
+renderNodes([]);
 renderClips([]);
 
 function query<T extends Element>(selector: string): T {
@@ -415,6 +502,7 @@ function filteredAssets(): LocalAsset[] {
 
 async function loadAsset(asset: LocalAsset): Promise<void> {
   selectedAssetId = asset.id;
+  currentGeometrySelection = null;
   renderAssets();
   selectedName.textContent = asset.name;
   selectedPath.textContent = asset.path;
@@ -426,6 +514,7 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
     setStatus({ label: "Model loaded", detail: `${model.stats.meshes} meshes, ${model.clips.length} clips`, tone: "ok" });
   } catch (error) {
     renderStats();
+    renderNodes([]);
     renderClips([]);
     setStatus({
       label: "Load failed",
@@ -437,6 +526,7 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
 
 function renderLoadedModel(model: LoadedModel): void {
   renderStats(model.stats);
+  renderNodes(model.nodes);
   renderClips(model.clips.map((clip) => clip.name || "Unnamed clip"));
 }
 
@@ -462,6 +552,154 @@ function renderStats(stats?: ModelStats): void {
   statsGrid.innerHTML = values
     .map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`)
     .join("");
+}
+
+function renderNodes(nodes: NodeInspectorInfo[]): void {
+  nodeList.innerHTML = "";
+
+  const selectionCard = document.createElement("div");
+  selectionCard.id = "geometrySelectionCard";
+  selectionCard.className = "geometry-selection-card";
+  nodeList.append(selectionCard);
+  renderGeometrySelection();
+
+  if (nodes.length === 0) {
+    nodeList.insertAdjacentHTML("beforeend", `<div class="empty-state compact">No GLTF scene nodes loaded.</div>`);
+    return;
+  }
+
+  const animatedCount = nodes.filter((node) => node.tags.includes("animated")).length;
+  const meshCount = nodes.filter((node) => node.tags.includes("mesh")).length;
+  const materialCount = nodes.reduce((count, node) => count + node.materials.length, 0);
+  const summary = document.createElement("div");
+  summary.className = "node-summary";
+  summary.innerHTML = `
+    <span>${nodes.length} nodes</span>
+    <span>${meshCount} meshes</span>
+    <span>${animatedCount} animated</span>
+    <span>${materialCount} material slots</span>
+  `;
+  nodeList.append(summary);
+
+  for (const node of nodes) {
+    const item = document.createElement("details");
+    item.className = "node-item";
+    item.open = node.tags.includes("mesh");
+
+    const tags = node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+    const transform = node.transform.map((value) => `<li>${escapeHtml(value)}</li>`).join("");
+    const isMesh = node.tags.includes("mesh");
+    const actions = isMesh
+      ? `
+        <div class="node-actions">
+          <button type="button" data-node-action="visible" data-node-id="${node.id}" aria-pressed="${node.visible}">${node.visible ? "Hide" : "Show"}</button>
+          <button type="button" data-node-action="highlight" data-node-id="${node.id}" aria-pressed="false">Highlight</button>
+        </div>
+      `
+      : "";
+    const geometry = node.geometry
+      ? `
+        <div class="node-detail-row"><span>Geometry</span><strong>${escapeHtml(node.geometry.name)}</strong></div>
+        <div class="node-detail-row"><span>Vertices</span><strong>${node.geometry.vertices.toLocaleString()}</strong></div>
+        <div class="node-detail-row"><span>Attributes</span><strong>${escapeHtml(node.geometry.attributes.join(", "))}</strong></div>
+      `
+      : "";
+    const materials =
+      node.materials.length > 0
+        ? `
+          <div class="node-materials">
+            ${node.materials
+              .map(
+                (material) => `
+                  <div class="material-row">
+                    <span class="material-swatch" style="--swatch: ${material.color ?? "#6e7a72"}"></span>
+                    <div>
+                      <strong>${escapeHtml(material.name)}</strong>
+                      <span>${materialLabel(material)}</span>
+                      ${
+                        material.color
+                          ? `
+                            <label class="material-color-edit">
+                              <span>Color</span>
+                              <input
+                                type="color"
+                                value="${material.color}"
+                                data-node-action="color"
+                                data-node-id="${node.id}"
+                                data-material-index="${material.index}"
+                              />
+                              <span class="material-hex">${material.color}</span>
+                            </label>
+                          `
+                          : ""
+                      }
+                    </div>
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+        `
+        : "";
+
+    item.innerHTML = `
+      <summary style="--node-indent: ${Math.min(node.depth, 8) * 10}px">
+        <span class="node-title">${escapeHtml(node.name)}</span>
+        <span class="node-type">${escapeHtml(node.type)}</span>
+      </summary>
+      <div class="node-details">
+        ${actions}
+        ${tags ? `<div class="node-tags">${tags}</div>` : ""}
+        <div class="node-detail-row"><span>Visible</span><strong>${node.visible ? "yes" : "no"}</strong></div>
+        <div class="node-detail-row"><span>Children</span><strong>${node.childCount}</strong></div>
+        ${geometry}
+        ${transform ? `<ul class="node-transform">${transform}</ul>` : ""}
+        ${materials}
+      </div>
+    `;
+
+    nodeList.append(item);
+  }
+}
+
+function renderGeometrySelection(): void {
+  const card = document.querySelector<HTMLElement>("#geometrySelectionCard");
+  if (!card) return;
+
+  if (!currentGeometrySelection) {
+    card.innerHTML = `
+      <strong>Click a surface</strong>
+      <span>Pick a connected geometry island inside a mesh/material slot.</span>
+    `;
+    return;
+  }
+
+  card.innerHTML = `
+    <strong>1 island selected</strong>
+    <span>${escapeHtml(currentGeometrySelection.nodeName)} · ${escapeHtml(currentGeometrySelection.materialName)}</span>
+    <div class="selection-stats">
+      <span>Island ${currentGeometrySelection.islandIndex} of ${currentGeometrySelection.islandCount}</span>
+      <span>${currentGeometrySelection.faceCount.toLocaleString()} faces</span>
+      <span>${currentGeometrySelection.vertexCount.toLocaleString()} welded verts</span>
+    </div>
+    <button type="button" data-selection-action="clear">Clear selection</button>
+  `;
+}
+
+function materialLabel(material: NodeInspectorInfo["materials"][number]): string {
+  const parts = [
+    material.color,
+    material.type,
+    `side ${material.side}`,
+    material.transparent ? "transparent" : "",
+    material.vertexColors ? "vertex colors" : "",
+    material.textureSlots.length > 0 ? `textures: ${material.textureSlots.join(", ")}` : "",
+    typeof material.roughness === "number" ? `rough ${material.roughness.toFixed(2)}` : "",
+    typeof material.metalness === "number" ? `metal ${material.metalness.toFixed(2)}` : "",
+    typeof material.opacity === "number" && material.opacity < 1 ? `opacity ${material.opacity.toFixed(2)}` : ""
+  ].filter(Boolean);
+
+  return escapeHtml(parts.join(" + "));
 }
 
 function renderClips(clips: string[]): void {

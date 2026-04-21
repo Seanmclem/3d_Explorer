@@ -5,34 +5,68 @@ import {
   AnimationMixer,
   Box3,
   Box3Helper,
+  BufferAttribute,
+  BufferGeometry,
   Clock,
   Color,
   DirectionalLight,
+  EdgesGeometry,
   GridHelper,
   Group,
+  LineBasicMaterial,
+  LineSegments,
   LoadingManager,
   Material,
   Mesh,
+  MeshBasicMaterial,
   MOUSE,
   Object3D,
   PCFSoftShadowMap,
   PerspectiveCamera,
+  Raycaster,
   Scene,
+  SkinnedMesh,
   SRGBColorSpace,
   TOUCH,
   Texture,
+  Vector2,
   Vector3,
   WebGLRenderer
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
-import type { LoadedModel, LocalAsset, ModelStats, PlaybackState } from "./types";
+import type {
+  GeometrySelectionInfo,
+  LoadedModel,
+  LocalAsset,
+  MaterialInspectorInfo,
+  ModelStats,
+  NodeInspectorInfo,
+  PlaybackState
+} from "./types";
 import { LocalAssetLibrary } from "./localAssets";
 
 export type ViewerOptions = {
   canvas: HTMLCanvasElement;
   onPlayback?: (state: PlaybackState) => void;
+  onGeometrySelection?: (selection: GeometrySelectionInfo | null) => void;
+};
+
+type PointerStart = {
+  x: number;
+  y: number;
+  button: number;
+};
+
+type GeometryIsland = {
+  materialIndex: number;
+  materialName: string;
+  islandIndex: number;
+  islandCount: number;
+  faceCount: number;
+  vertexCount: number;
+  triangleOffsets: number[];
 };
 
 const DEFAULT_CAMERA_POSITION = new Vector3(4.5, 3, 6);
@@ -48,7 +82,15 @@ export class GltfViewer {
   private readonly grid = new GridHelper(10, 20, 0x94a39a, 0x27302b);
   private readonly boundsHelper = new Box3Helper(new Box3(), 0x19c37d);
   private readonly onPlayback?: (state: PlaybackState) => void;
+  private readonly onGeometrySelection?: (selection: GeometrySelectionInfo | null) => void;
   private readonly resizeObserver: ResizeObserver;
+  private readonly inspectedNodes = new Map<number, Object3D>();
+  private readonly nodeIdsByMesh = new WeakMap<Mesh, number>();
+  private readonly highlightHelpers = new Map<number, Object3D>();
+  private readonly raycaster = new Raycaster();
+  private readonly pointerNdc = new Vector2();
+  private pointerStart?: PointerStart;
+  private islandHighlight?: Object3D;
   private animationFrame = 0;
   private mixer?: AnimationMixer;
   private clips: AnimationClip[] = [];
@@ -62,6 +104,7 @@ export class GltfViewer {
 
   constructor(options: ViewerOptions) {
     this.onPlayback = options.onPlayback;
+    this.onGeometrySelection = options.onGeometrySelection;
     this.scene.background = new Color(0x101210);
     this.camera = new PerspectiveCamera(45, 1, 0.01, 2000);
     this.camera.position.copy(DEFAULT_CAMERA_POSITION);
@@ -109,6 +152,8 @@ export class GltfViewer {
     this.resizeObserver.observe(this.renderer.domElement.parentElement ?? this.renderer.domElement);
     this.renderer.domElement.addEventListener("webglcontextlost", this.handleContextLost);
     this.renderer.domElement.addEventListener("webglcontextrestored", this.handleContextRestored);
+    this.renderer.domElement.addEventListener("pointerdown", this.handlePointerDown);
+    this.renderer.domElement.addEventListener("pointerup", this.handlePointerUp);
     this.resize();
     this.tick();
   }
@@ -147,6 +192,7 @@ export class GltfViewer {
     this.paused = true;
 
     const stats = this.updateBoundsAndStats(root, gltf.animations.length);
+    const nodes = this.describeNodes(root, gltf.animations);
     this.fitCameraToObject(root);
 
     if (this.clips.length > 0) {
@@ -156,7 +202,7 @@ export class GltfViewer {
       this.emitPlayback();
     }
 
-    return { clips: this.clips, stats };
+    return { clips: this.clips, stats, nodes };
   }
 
   setGridVisible(visible: boolean): void {
@@ -184,6 +230,55 @@ export class GltfViewer {
     this.controls.mouseButtons.RIGHT = enabled ? MOUSE.ROTATE : MOUSE.PAN;
     this.controls.touches.ONE = enabled ? TOUCH.PAN : TOUCH.ROTATE;
     this.renderer.domElement.dataset.mode = enabled ? "pan" : "orbit";
+  }
+
+  setNodeVisible(nodeId: number, visible: boolean): boolean {
+    const node = this.inspectedNodes.get(nodeId);
+    if (!node) return false;
+
+    node.visible = visible;
+    const highlight = this.highlightHelpers.get(nodeId);
+    if (highlight) highlight.visible = visible;
+    return true;
+  }
+
+  setNodeHighlighted(nodeId: number, highlighted: boolean): boolean {
+    const node = this.inspectedNodes.get(nodeId);
+    if (!(node instanceof Mesh)) return false;
+
+    if (!highlighted) {
+      this.removeHighlight(nodeId);
+      return true;
+    }
+
+    const existing = this.highlightHelpers.get(nodeId);
+    if (existing) {
+      existing.visible = node.visible;
+      return true;
+    }
+
+    const helper = this.createMeshHighlight(node);
+    node.add(helper);
+    this.highlightHelpers.set(nodeId, helper);
+    return true;
+  }
+
+  setMaterialColor(nodeId: number, materialIndex: number, color: string): boolean {
+    const node = this.inspectedNodes.get(nodeId);
+    if (!(node instanceof Mesh)) return false;
+
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    const material = materials[materialIndex] as (Material & { color?: Color }) | undefined;
+    if (!material?.color) return false;
+
+    material.color.set(color);
+    material.needsUpdate = true;
+    return true;
+  }
+
+  clearGeometrySelection(): void {
+    this.clearIslandHighlight();
+    this.onGeometrySelection?.(null);
   }
 
   setPlaybackSpeed(speed: number): void {
@@ -238,6 +333,8 @@ export class GltfViewer {
   }
 
   capturePng(): string {
+    this.controls.update();
+    this.camera.updateMatrixWorld(true);
     this.renderer.render(this.scene, this.camera);
     return this.renderer.domElement.toDataURL("image/png");
   }
@@ -250,6 +347,8 @@ export class GltfViewer {
     this.controls.dispose();
     this.renderer.domElement.removeEventListener("webglcontextlost", this.handleContextLost);
     this.renderer.domElement.removeEventListener("webglcontextrestored", this.handleContextRestored);
+    this.renderer.domElement.removeEventListener("pointerdown", this.handlePointerDown);
+    this.renderer.domElement.removeEventListener("pointerup", this.handlePointerUp);
     this.renderer.dispose();
   }
 
@@ -283,6 +382,10 @@ export class GltfViewer {
     this.clips = [];
     this.activeAction = undefined;
     this.activeClipIndex = -1;
+    this.inspectedNodes.clear();
+    this.clearIslandHighlight();
+    this.onGeometrySelection?.(null);
+    this.clearHighlights();
 
     while (this.modelGroup.children.length > 0) {
       const child = this.modelGroup.children.pop();
@@ -319,6 +422,444 @@ export class GltfViewer {
       const wireMaterial = material as Material & { wireframe?: boolean };
       wireMaterial.wireframe = enabled;
       wireMaterial.needsUpdate = true;
+    }
+  }
+
+  private describeNodes(root: Object3D, clips: AnimationClip[]): NodeInspectorInfo[] {
+    const animationTargets = this.animationTargetNames(clips);
+    const depths = new Map<Object3D, number>();
+    const nodes: NodeInspectorInfo[] = [];
+    let id = 0;
+
+    depths.set(root, 0);
+    root.traverse((node) => {
+      const depth = depths.get(node) ?? 0;
+      for (const child of node.children) {
+        depths.set(child, depth + 1);
+      }
+
+      const materials = node instanceof Mesh ? this.describeMaterials(node) : [];
+      const transform = this.describeTransform(node);
+      const tags = this.describeNodeTags(node, animationTargets, materials);
+      const geometry = node instanceof Mesh ? this.describeGeometry(node) : undefined;
+
+      const nodeId = id++;
+      this.inspectedNodes.set(nodeId, node);
+      if (node instanceof Mesh) {
+        this.nodeIdsByMesh.set(node, nodeId);
+      }
+
+      nodes.push({
+        id: nodeId,
+        depth,
+        name: node.name || "(unnamed)",
+        type: node.type,
+        visible: node.visible,
+        childCount: node.children.length,
+        tags,
+        transform,
+        geometry,
+        materials
+      });
+    });
+
+    return nodes;
+  }
+
+  private describeNodeTags(
+    node: Object3D,
+    animationTargets: Set<string>,
+    materials: MaterialInspectorInfo[]
+  ): string[] {
+    const tags: string[] = [];
+    if (node instanceof Mesh) tags.push("mesh");
+    if ("isSkinnedMesh" in node && node.isSkinnedMesh) tags.push("skinned");
+    if (animationTargets.has(node.name)) tags.push("animated");
+    if (materials.length > 0) tags.push(`${materials.length} material${materials.length === 1 ? "" : "s"}`);
+    if (!node.visible) tags.push("hidden");
+    if (node.children.length > 0) tags.push(`${node.children.length} child${node.children.length === 1 ? "" : "ren"}`);
+    return tags;
+  }
+
+  private describeGeometry(mesh: Mesh): NodeInspectorInfo["geometry"] {
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+
+    return {
+      name: geometry.name || "Geometry",
+      vertices: position?.count ?? 0,
+      attributes: Object.keys(geometry.attributes),
+      indexed: Boolean(geometry.index)
+    };
+  }
+
+  private describeMaterials(mesh: Mesh): MaterialInspectorInfo[] {
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    return materials.map((material, index) => {
+      const materialRecord = material as Material & Record<string, unknown>;
+      const color = materialRecord.color instanceof Color ? `#${materialRecord.color.getHexString()}` : undefined;
+      const textureSlots = [
+        "map",
+        "normalMap",
+        "roughnessMap",
+        "metalnessMap",
+        "emissiveMap",
+        "aoMap",
+        "alphaMap"
+      ].filter((slot) => materialRecord[slot] instanceof Texture);
+
+      return {
+        index,
+        name: material.name || "Unnamed material",
+        type: material.type,
+        color,
+        opacity: typeof materialRecord.opacity === "number" ? materialRecord.opacity : undefined,
+        metalness: typeof materialRecord.metalness === "number" ? materialRecord.metalness : undefined,
+        roughness: typeof materialRecord.roughness === "number" ? materialRecord.roughness : undefined,
+        transparent: material.transparent,
+        side: this.materialSideLabel(material.side),
+        textureSlots,
+        vertexColors: Boolean(material.vertexColors)
+      };
+    });
+  }
+
+  private describeTransform(node: Object3D): string[] {
+    const transform: string[] = [];
+    if (node.position.lengthSq() > 0.000001) {
+      transform.push(`pos ${node.position.x.toFixed(2)}, ${node.position.y.toFixed(2)}, ${node.position.z.toFixed(2)}`);
+    }
+    if (Math.abs(node.rotation.x) > 0.000001 || Math.abs(node.rotation.y) > 0.000001 || Math.abs(node.rotation.z) > 0.000001) {
+      transform.push(`rot ${node.rotation.x.toFixed(2)}, ${node.rotation.y.toFixed(2)}, ${node.rotation.z.toFixed(2)}`);
+    }
+    if (Math.abs(node.scale.x - 1) > 0.000001 || Math.abs(node.scale.y - 1) > 0.000001 || Math.abs(node.scale.z - 1) > 0.000001) {
+      transform.push(`scale ${node.scale.x.toFixed(2)}, ${node.scale.y.toFixed(2)}, ${node.scale.z.toFixed(2)}`);
+    }
+    return transform;
+  }
+
+  private animationTargetNames(clips: AnimationClip[]): Set<string> {
+    const names = new Set<string>();
+    const targetSuffix = /\.(position|quaternion|rotation|scale|morphTargetInfluences)(\.|$|\[)/;
+
+    for (const clip of clips) {
+      for (const track of clip.tracks) {
+        const match = targetSuffix.exec(track.name);
+        if (match?.index && match.index > 0) {
+          names.add(track.name.slice(0, match.index));
+        }
+      }
+    }
+
+    return names;
+  }
+
+  private materialSideLabel(side: number): string {
+    if (side === 0) return "front";
+    if (side === 1) return "back";
+    if (side === 2) return "double";
+    return `side ${side}`;
+  }
+
+  private removeHighlight(nodeId: number): void {
+    const helper = this.highlightHelpers.get(nodeId);
+    if (!helper) return;
+
+    helper.removeFromParent();
+    helper.traverse((node) => {
+      if (!(node instanceof Mesh || node instanceof LineSegments)) return;
+      node.geometry.dispose();
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      for (const material of materials) {
+        material.dispose();
+      }
+    });
+    this.highlightHelpers.delete(nodeId);
+  }
+
+  private createMeshHighlight(mesh: Mesh): Object3D {
+    const group = new Group();
+    group.name = `${mesh.name || "mesh"} highlight`;
+    group.visible = mesh.visible;
+    group.renderOrder = 10;
+
+    const edges = new LineSegments(
+      new EdgesGeometry(mesh.geometry, 20),
+      new LineBasicMaterial({
+        color: 0xffd166,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.95
+      })
+    );
+    edges.renderOrder = 10;
+    group.add(edges);
+
+    const wire = new Mesh(
+      mesh.geometry,
+      new MeshBasicMaterial({
+        color: 0xffd166,
+        wireframe: true,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.22
+      })
+    );
+    wire.renderOrder = 9;
+    group.add(wire);
+
+    return group;
+  }
+
+  private selectGeometryIsland(clientX: number, clientY: number): void {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointerNdc.y = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+
+    const meshes = Array.from(this.inspectedNodes.values()).filter((node): node is Mesh => node instanceof Mesh && node.visible);
+    const [hit] = this.raycaster.intersectObjects(meshes, false);
+    if (!hit || !(hit.object instanceof Mesh) || hit.faceIndex == null) {
+      this.clearGeometrySelection();
+      return;
+    }
+
+    const nodeId = this.nodeIdsByMesh.get(hit.object);
+    if (nodeId == null) {
+      this.clearGeometrySelection();
+      return;
+    }
+
+    const island = this.findGeometryIsland(hit.object, hit.faceIndex);
+    if (!island) {
+      this.clearGeometrySelection();
+      return;
+    }
+
+    this.showIslandHighlight(hit.object, island.triangleOffsets);
+    this.onGeometrySelection?.({
+      nodeId,
+      nodeName: hit.object.name || "(unnamed)",
+      materialIndex: island.materialIndex,
+      materialName: island.materialName,
+      islandIndex: island.islandIndex,
+      islandCount: island.islandCount,
+      faceCount: island.faceCount,
+      vertexCount: island.vertexCount
+    });
+  }
+
+  private findGeometryIsland(mesh: Mesh, faceIndex: number): GeometryIsland | undefined {
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+    if (!position) return undefined;
+
+    const index = geometry.index;
+    const totalEntries = index?.count ?? position.count;
+    const clickedOffset = faceIndex * 3;
+    const group =
+      geometry.groups.find((item) => clickedOffset >= item.start && clickedOffset < item.start + item.count) ?? {
+        start: 0,
+        count: totalEntries,
+        materialIndex: 0
+      };
+
+    const groupStart = group.start;
+    const groupEnd = group.start + group.count;
+    const triangleOffsets: number[] = [];
+    const weldedIds = new Map<string, number>();
+    const vertexIds = new Map<number, number>();
+
+    const sourceVertex = (entry: number) => index?.getX(entry) ?? entry;
+    const weldedIdFor = (vertexIndex: number): number => {
+      const existing = vertexIds.get(vertexIndex);
+      if (existing != null) return existing;
+
+      const key = [
+        Math.round(position.getX(vertexIndex) * 10000),
+        Math.round(position.getY(vertexIndex) * 10000),
+        Math.round(position.getZ(vertexIndex) * 10000)
+      ].join(",");
+      let id = weldedIds.get(key);
+      if (id == null) {
+        id = weldedIds.size;
+        weldedIds.set(key, id);
+      }
+      vertexIds.set(vertexIndex, id);
+      return id;
+    };
+
+    for (let offset = groupStart; offset < groupEnd; offset += 3) {
+      triangleOffsets.push(offset);
+      weldedIdFor(sourceVertex(offset));
+      weldedIdFor(sourceVertex(offset + 1));
+      weldedIdFor(sourceVertex(offset + 2));
+    }
+
+    const triangleVertexIds = triangleOffsets.map((offset) => [
+      weldedIdFor(sourceVertex(offset)),
+      weldedIdFor(sourceVertex(offset + 1)),
+      weldedIdFor(sourceVertex(offset + 2))
+    ]);
+    const vertexToTriangles = new Map<number, number[]>();
+    triangleVertexIds.forEach((ids, triangleIndex) => {
+      for (const id of ids) {
+        const entries = vertexToTriangles.get(id) ?? [];
+        entries.push(triangleIndex);
+        vertexToTriangles.set(id, entries);
+      }
+    });
+
+    const clickedTriangleIndex = triangleOffsets.indexOf(clickedOffset);
+    if (clickedTriangleIndex < 0) return undefined;
+
+    const components: number[][] = [];
+    const visited = new Set<number>();
+    for (let start = 0; start < triangleOffsets.length; start += 1) {
+      if (visited.has(start)) continue;
+
+      const component: number[] = [];
+      const queue = [start];
+      visited.add(start);
+      while (queue.length > 0) {
+        const triangleIndex = queue.shift();
+        if (triangleIndex == null) continue;
+        component.push(triangleIndex);
+
+        for (const vertexId of triangleVertexIds[triangleIndex]) {
+          for (const neighbor of vertexToTriangles.get(vertexId) ?? []) {
+            if (visited.has(neighbor)) continue;
+            visited.add(neighbor);
+            queue.push(neighbor);
+          }
+        }
+      }
+      components.push(component);
+    }
+
+    const selectedComponentIndex = components.findIndex((component) => component.includes(clickedTriangleIndex));
+    const selectedComponent = components[selectedComponentIndex];
+    if (!selectedComponent) return undefined;
+
+    const selectedOffsets = selectedComponent.flatMap((triangleIndex) => {
+      const offset = triangleOffsets[triangleIndex];
+      return offset == null ? [] : [offset];
+    });
+    const selectedVertices = new Set<number>();
+    for (const offset of selectedOffsets) {
+      selectedVertices.add(weldedIdFor(sourceVertex(offset)));
+      selectedVertices.add(weldedIdFor(sourceVertex(offset + 1)));
+      selectedVertices.add(weldedIdFor(sourceVertex(offset + 2)));
+    }
+
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const materialIndex = group.materialIndex ?? 0;
+    const material = materials[materialIndex];
+
+    return {
+      materialIndex,
+      materialName: material?.name || `Material ${materialIndex + 1}`,
+      islandIndex: selectedComponentIndex + 1,
+      islandCount: components.length,
+      faceCount: selectedOffsets.length,
+      vertexCount: selectedVertices.size,
+      triangleOffsets: selectedOffsets
+    };
+  }
+
+  private showIslandHighlight(mesh: Mesh, triangleOffsets: number[]): void {
+    this.clearIslandHighlight();
+
+    const geometry = this.createIslandGeometry(mesh.geometry, triangleOffsets);
+    const solid = this.createIslandRenderable(
+      mesh,
+      geometry,
+      new MeshBasicMaterial({
+        color: 0x19c37d,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.26
+      })
+    );
+    const wire = this.createIslandRenderable(
+      mesh,
+      geometry,
+      new MeshBasicMaterial({
+        color: 0xffd166,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.9,
+        wireframe: true
+      })
+    );
+    const group = new Group();
+    group.name = "Geometry island selection";
+    group.renderOrder = 20;
+    solid.renderOrder = 20;
+    wire.renderOrder = 21;
+    group.add(solid, wire);
+
+    (mesh.parent ?? this.scene).add(group);
+    group.position.copy(mesh.position);
+    group.quaternion.copy(mesh.quaternion);
+    group.scale.copy(mesh.scale);
+    this.islandHighlight = group;
+  }
+
+  private createIslandGeometry(source: BufferGeometry, triangleOffsets: number[]): BufferGeometry {
+    const index = source.index;
+    const sourceVertex = (entry: number) => index?.getX(entry) ?? entry;
+    const geometry = new BufferGeometry();
+    const attributeNames = Object.keys(source.attributes).filter((name) =>
+      ["position", "normal", "skinIndex", "skinWeight"].includes(name)
+    );
+
+    for (const name of attributeNames) {
+      const attribute = source.getAttribute(name) as BufferAttribute | undefined;
+      if (!attribute) continue;
+
+      const values: number[] = [];
+      for (const offset of triangleOffsets) {
+        for (let corner = 0; corner < 3; corner += 1) {
+          const vertexIndex = sourceVertex(offset + corner);
+          for (let item = 0; item < attribute.itemSize; item += 1) {
+            values.push(attribute.getComponent(vertexIndex, item));
+          }
+        }
+      }
+      geometry.setAttribute(name, new BufferAttribute(new Float32Array(values), attribute.itemSize));
+    }
+
+    return geometry;
+  }
+
+  private createIslandRenderable(mesh: Mesh, geometry: BufferGeometry, material: MeshBasicMaterial): Mesh {
+    if (mesh instanceof SkinnedMesh) {
+      const helper = new SkinnedMesh(geometry, material);
+      helper.bind(mesh.skeleton, mesh.bindMatrix);
+      return helper;
+    }
+    return new Mesh(geometry, material);
+  }
+
+  private clearIslandHighlight(): void {
+    if (!this.islandHighlight) return;
+
+    this.islandHighlight.removeFromParent();
+    this.islandHighlight.traverse((node) => {
+      if (!(node instanceof Mesh)) return;
+      node.geometry.dispose();
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      for (const material of materials) {
+        material.dispose();
+      }
+    });
+    this.islandHighlight = undefined;
+  }
+
+  private clearHighlights(): void {
+    for (const nodeId of Array.from(this.highlightHelpers.keys())) {
+      this.removeHighlight(nodeId);
     }
   }
 
@@ -417,5 +958,23 @@ export class GltfViewer {
   private handleContextRestored = () => {
     this.clock.getDelta();
     this.tick();
+  };
+
+  private handlePointerDown = (event: PointerEvent) => {
+    this.pointerStart = {
+      x: event.clientX,
+      y: event.clientY,
+      button: event.button
+    };
+  };
+
+  private handlePointerUp = (event: PointerEvent) => {
+    if (!this.pointerStart || this.pointerStart.button !== 0 || event.button !== 0) return;
+
+    const distance = Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y);
+    this.pointerStart = undefined;
+    if (distance > 4) return;
+
+    this.selectGeometryIsland(event.clientX, event.clientY);
   };
 }
