@@ -69,6 +69,7 @@ export type NodeInspectorInfo = {
 };
 
 export type GeometrySelectionInfo = {
+  id: string;
   nodeId: number;
   nodeName: string;
   materialIndex: number;
@@ -77,6 +78,7 @@ export type GeometrySelectionInfo = {
   islandCount: number;
   faceCount: number;
   vertexCount: number;
+  hidden: boolean;
 };
 
 export type LoadedModel = {

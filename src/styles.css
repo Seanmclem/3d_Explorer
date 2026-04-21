@@ -426,7 +426,8 @@ h3 {
   font-size: 0.78rem;
 }
 
-.geometry-selection-card button {
+.geometry-selection-card button,
+.island-actions button {
   width: fit-content;
   min-height: 30px;
   padding: 6px 9px;
@@ -437,6 +438,12 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
 }
 
 .selection-stats span {
@@ -539,6 +546,66 @@ h3 {
   padding-left: 16px;
   color: #a8b9af;
   font-size: 0.76rem;
+}
+
+.node-subsection {
+  border: 1px solid #26302a;
+  border-radius: 8px;
+  background: #0f1813;
+}
+
+.node-subsection summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 32px;
+  padding: 7px 8px;
+  color: #dce9e1;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.island-list {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid #26302a;
+  padding: 8px;
+}
+
+.island-row {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #26302a;
+  border-radius: 8px;
+  padding: 8px;
+  background: #111511;
+}
+
+.island-row.is-hidden {
+  opacity: 0.62;
+}
+
+.island-row.is-selected {
+  border-color: #19c37d;
+  background: #12231a;
+}
+
+.island-row strong,
+.island-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.island-row span {
+  color: #a8b9af;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.island-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
 }
 
 .node-materials {

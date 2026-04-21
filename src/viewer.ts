@@ -69,6 +69,32 @@ type GeometryIsland = {
   triangleOffsets: number[];
 };
 
+type IslandPick = {
+  mesh: Mesh;
+  faceOffset: number;
+  ndcZ: number;
+  screenDistance: number;
+};
+
+type GeometryGroupRecord = {
+  start: number;
+  count: number;
+  materialIndex?: number;
+};
+
+type MeshGroupState = {
+  originalGroups: GeometryGroupRecord[];
+  originalMaterial: Material | Material[];
+  materials: Material[];
+  hiddenMaterial: MeshBasicMaterial;
+};
+
+type GeometryIslandRecord = {
+  info: GeometrySelectionInfo;
+  mesh: Mesh;
+  triangleOffsets: number[];
+};
+
 const DEFAULT_CAMERA_POSITION = new Vector3(4.5, 3, 6);
 
 export class GltfViewer {
@@ -87,10 +113,13 @@ export class GltfViewer {
   private readonly inspectedNodes = new Map<number, Object3D>();
   private readonly nodeIdsByMesh = new WeakMap<Mesh, number>();
   private readonly highlightHelpers = new Map<number, Object3D>();
+  private readonly geometryIslands = new Map<string, GeometryIslandRecord>();
+  private readonly meshGroupStates = new Map<Mesh, MeshGroupState>();
   private readonly raycaster = new Raycaster();
   private readonly pointerNdc = new Vector2();
   private pointerStart?: PointerStart;
   private islandHighlight?: Object3D;
+  private currentGeometrySelectionId?: string;
   private animationFrame = 0;
   private mixer?: AnimationMixer;
   private clips: AnimationClip[] = [];
@@ -278,7 +307,48 @@ export class GltfViewer {
 
   clearGeometrySelection(): void {
     this.clearIslandHighlight();
+    this.currentGeometrySelectionId = undefined;
     this.onGeometrySelection?.(null);
+  }
+
+  getGeometrySelections(): GeometrySelectionInfo[] {
+    return this.getGeometryIslands();
+  }
+
+  getGeometryIslands(): GeometrySelectionInfo[] {
+    return Array.from(this.geometryIslands.values()).map((record) => record.info);
+  }
+
+  setGeometrySelectionHidden(selectionId: string, hidden: boolean): boolean {
+    const record = this.geometryIslands.get(selectionId);
+    if (!record) return false;
+
+    record.info = {
+      ...record.info,
+      hidden
+    };
+    this.rebuildHiddenGeometry(record.mesh);
+
+    if (this.currentGeometrySelectionId === selectionId) {
+      if (hidden) {
+        this.clearIslandHighlight();
+      } else {
+        this.showIslandHighlight(record.mesh, record.triangleOffsets);
+      }
+      this.onGeometrySelection?.(record.info);
+    }
+
+    return true;
+  }
+
+  highlightGeometrySelection(selectionId: string): boolean {
+    const record = this.geometryIslands.get(selectionId);
+    if (!record) return false;
+
+    this.currentGeometrySelectionId = selectionId;
+    this.showIslandHighlight(record.mesh, record.triangleOffsets);
+    this.onGeometrySelection?.(record.info);
+    return true;
   }
 
   setPlaybackSpeed(speed: number): void {
@@ -383,6 +453,12 @@ export class GltfViewer {
     this.activeAction = undefined;
     this.activeClipIndex = -1;
     this.inspectedNodes.clear();
+    this.geometryIslands.clear();
+    for (const state of this.meshGroupStates.values()) {
+      state.hiddenMaterial.dispose();
+    }
+    this.meshGroupStates.clear();
+    this.currentGeometrySelectionId = undefined;
     this.clearIslandHighlight();
     this.onGeometrySelection?.(null);
     this.clearHighlights();
@@ -447,6 +523,7 @@ export class GltfViewer {
       this.inspectedNodes.set(nodeId, node);
       if (node instanceof Mesh) {
         this.nodeIdsByMesh.set(node, nodeId);
+        this.indexGeometryIslands(node, nodeId);
       }
 
       nodes.push({
@@ -619,152 +696,306 @@ export class GltfViewer {
 
     const meshes = Array.from(this.inspectedNodes.values()).filter((node): node is Mesh => node instanceof Mesh && node.visible);
     const [hit] = this.raycaster.intersectObjects(meshes, false);
-    if (!hit || !(hit.object instanceof Mesh) || hit.faceIndex == null) {
+    const rayPick =
+      hit && hit.object instanceof Mesh && hit.faceIndex != null && !this.isTriangleHidden(hit.object, hit.faceIndex * 3)
+        ? {
+            mesh: hit.object,
+            faceOffset: hit.faceIndex * 3,
+            ndcZ: hit.point.clone().project(this.camera).z,
+            screenDistance: 0
+          }
+        : undefined;
+    const screenPick = this.pickProjectedTriangle(clientX, clientY, meshes, rect);
+    const pick =
+      screenPick && (!rayPick || screenPick.screenDistance < 1 || screenPick.ndcZ <= rayPick.ndcZ + 0.015)
+        ? screenPick
+        : rayPick;
+
+    if (!pick) {
       this.clearGeometrySelection();
       return;
     }
 
-    const nodeId = this.nodeIdsByMesh.get(hit.object);
+    const nodeId = this.nodeIdsByMesh.get(pick.mesh);
     if (nodeId == null) {
       this.clearGeometrySelection();
       return;
     }
 
-    const island = this.findGeometryIsland(hit.object, hit.faceIndex);
-    if (!island) {
+    const record = this.findGeometryIslandAtOffset(pick.mesh, pick.faceOffset);
+    if (!record) {
       this.clearGeometrySelection();
       return;
     }
 
-    this.showIslandHighlight(hit.object, island.triangleOffsets);
-    this.onGeometrySelection?.({
-      nodeId,
-      nodeName: hit.object.name || "(unnamed)",
-      materialIndex: island.materialIndex,
-      materialName: island.materialName,
-      islandIndex: island.islandIndex,
-      islandCount: island.islandCount,
-      faceCount: island.faceCount,
-      vertexCount: island.vertexCount
-    });
+    this.currentGeometrySelectionId = record.info.id;
+    this.showIslandHighlight(pick.mesh, record.triangleOffsets);
+    this.onGeometrySelection?.(record.info);
   }
 
-  private findGeometryIsland(mesh: Mesh, faceIndex: number): GeometryIsland | undefined {
+  private findGeometryIslandAtOffset(mesh: Mesh, clickedOffset: number): GeometryIslandRecord | undefined {
+    const record = Array.from(this.geometryIslands.values()).find(
+      (island) => island.mesh === mesh && island.triangleOffsets.includes(clickedOffset)
+    );
+    if (record) return record;
+
+    const nodeId = this.nodeIdsByMesh.get(mesh);
+    if (nodeId == null) return undefined;
+    this.indexGeometryIslands(mesh, nodeId);
+    return Array.from(this.geometryIslands.values()).find(
+      (island) => island.mesh === mesh && island.triangleOffsets.includes(clickedOffset)
+    );
+  }
+
+  private indexGeometryIslands(mesh: Mesh, nodeId: number): void {
+    for (const [id, record] of Array.from(this.geometryIslands.entries())) {
+      if (record.mesh === mesh) {
+        this.geometryIslands.delete(id);
+      }
+    }
+
+    const islands = this.buildGeometryIslands(mesh);
+    for (const island of islands) {
+      const id = `${nodeId}:${island.materialIndex}:${island.islandIndex}`;
+      this.geometryIslands.set(id, {
+        info: {
+          id,
+          nodeId,
+          nodeName: mesh.name || "(unnamed)",
+          materialIndex: island.materialIndex,
+          materialName: island.materialName,
+          islandIndex: island.islandIndex,
+          islandCount: island.islandCount,
+          faceCount: island.faceCount,
+          vertexCount: island.vertexCount,
+          hidden: false
+        },
+        mesh,
+        triangleOffsets: island.triangleOffsets
+      });
+    }
+  }
+
+  private buildGeometryIslands(mesh: Mesh): GeometryIsland[] {
     const geometry = mesh.geometry;
     const position = geometry.getAttribute("position");
-    if (!position) return undefined;
+    if (!position) return [];
 
     const index = geometry.index;
     const totalEntries = index?.count ?? position.count;
-    const clickedOffset = faceIndex * 3;
-    const group =
-      geometry.groups.find((item) => clickedOffset >= item.start && clickedOffset < item.start + item.count) ?? {
-        start: 0,
-        count: totalEntries,
-        materialIndex: 0
+    const groups = geometry.groups.length > 0 ? geometry.groups : [{ start: 0, count: totalEntries, materialIndex: 0 }];
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const islands: GeometryIsland[] = [];
+
+    for (const group of groups) {
+      const groupStart = group.start;
+      const groupEnd = group.start + group.count;
+      const triangleOffsets: number[] = [];
+      const weldedIds = new Map<string, number>();
+      const vertexIds = new Map<number, number>();
+
+      const sourceVertex = (entry: number) => index?.getX(entry) ?? entry;
+      const weldedIdFor = (vertexIndex: number): number => {
+        const existing = vertexIds.get(vertexIndex);
+        if (existing != null) return existing;
+
+        const key = [
+          Math.round(position.getX(vertexIndex) * 10000),
+          Math.round(position.getY(vertexIndex) * 10000),
+          Math.round(position.getZ(vertexIndex) * 10000)
+        ].join(",");
+        let id = weldedIds.get(key);
+        if (id == null) {
+          id = weldedIds.size;
+          weldedIds.set(key, id);
+        }
+        vertexIds.set(vertexIndex, id);
+        return id;
       };
 
-    const groupStart = group.start;
-    const groupEnd = group.start + group.count;
-    const triangleOffsets: number[] = [];
-    const weldedIds = new Map<string, number>();
-    const vertexIds = new Map<number, number>();
-
-    const sourceVertex = (entry: number) => index?.getX(entry) ?? entry;
-    const weldedIdFor = (vertexIndex: number): number => {
-      const existing = vertexIds.get(vertexIndex);
-      if (existing != null) return existing;
-
-      const key = [
-        Math.round(position.getX(vertexIndex) * 10000),
-        Math.round(position.getY(vertexIndex) * 10000),
-        Math.round(position.getZ(vertexIndex) * 10000)
-      ].join(",");
-      let id = weldedIds.get(key);
-      if (id == null) {
-        id = weldedIds.size;
-        weldedIds.set(key, id);
+      for (let offset = groupStart; offset < groupEnd; offset += 3) {
+        triangleOffsets.push(offset);
+        weldedIdFor(sourceVertex(offset));
+        weldedIdFor(sourceVertex(offset + 1));
+        weldedIdFor(sourceVertex(offset + 2));
       }
-      vertexIds.set(vertexIndex, id);
-      return id;
-    };
 
-    for (let offset = groupStart; offset < groupEnd; offset += 3) {
-      triangleOffsets.push(offset);
-      weldedIdFor(sourceVertex(offset));
-      weldedIdFor(sourceVertex(offset + 1));
-      weldedIdFor(sourceVertex(offset + 2));
+      const triangleVertexIds = triangleOffsets.map((offset) => [
+        weldedIdFor(sourceVertex(offset)),
+        weldedIdFor(sourceVertex(offset + 1)),
+        weldedIdFor(sourceVertex(offset + 2))
+      ]);
+      const vertexToTriangles = new Map<number, number[]>();
+      triangleVertexIds.forEach((ids, triangleIndex) => {
+        for (const id of ids) {
+          const entries = vertexToTriangles.get(id) ?? [];
+          entries.push(triangleIndex);
+          vertexToTriangles.set(id, entries);
+        }
+      });
+
+      const components: number[][] = [];
+      const visited = new Set<number>();
+      for (let start = 0; start < triangleOffsets.length; start += 1) {
+        if (visited.has(start)) continue;
+
+        const component: number[] = [];
+        const queue = [start];
+        visited.add(start);
+        while (queue.length > 0) {
+          const triangleIndex = queue.shift();
+          if (triangleIndex == null) continue;
+          component.push(triangleIndex);
+
+          for (const vertexId of triangleVertexIds[triangleIndex]) {
+            for (const neighbor of vertexToTriangles.get(vertexId) ?? []) {
+              if (visited.has(neighbor)) continue;
+              visited.add(neighbor);
+              queue.push(neighbor);
+            }
+          }
+        }
+        components.push(component);
+      }
+
+      const materialIndex = group.materialIndex ?? 0;
+      const material = materials[materialIndex];
+      components.forEach((component, componentIndex) => {
+        const selectedOffsets = component.flatMap((triangleIndex) => {
+          const offset = triangleOffsets[triangleIndex];
+          return offset == null ? [] : [offset];
+        });
+        const selectedVertices = new Set<number>();
+        for (const offset of selectedOffsets) {
+          selectedVertices.add(weldedIdFor(sourceVertex(offset)));
+          selectedVertices.add(weldedIdFor(sourceVertex(offset + 1)));
+          selectedVertices.add(weldedIdFor(sourceVertex(offset + 2)));
+        }
+
+        islands.push({
+          materialIndex,
+          materialName: material?.name || `Material ${materialIndex + 1}`,
+          islandIndex: componentIndex + 1,
+          islandCount: components.length,
+          faceCount: selectedOffsets.length,
+          vertexCount: selectedVertices.size,
+          triangleOffsets: selectedOffsets
+        });
+      });
     }
 
-    const triangleVertexIds = triangleOffsets.map((offset) => [
-      weldedIdFor(sourceVertex(offset)),
-      weldedIdFor(sourceVertex(offset + 1)),
-      weldedIdFor(sourceVertex(offset + 2))
-    ]);
-    const vertexToTriangles = new Map<number, number[]>();
-    triangleVertexIds.forEach((ids, triangleIndex) => {
-      for (const id of ids) {
-        const entries = vertexToTriangles.get(id) ?? [];
-        entries.push(triangleIndex);
-        vertexToTriangles.set(id, entries);
-      }
-    });
+    return islands;
+  }
 
-    const clickedTriangleIndex = triangleOffsets.indexOf(clickedOffset);
-    if (clickedTriangleIndex < 0) return undefined;
+  private pickProjectedTriangle(
+    clientX: number,
+    clientY: number,
+    meshes: Mesh[],
+    rect: DOMRect
+  ): IslandPick | undefined {
+    let best: IslandPick | undefined;
+    const threshold = 14;
+    const point = new Vector2(clientX, clientY);
 
-    const components: number[][] = [];
-    const visited = new Set<number>();
-    for (let start = 0; start < triangleOffsets.length; start += 1) {
-      if (visited.has(start)) continue;
+    for (const mesh of meshes) {
+      const geometry = mesh.geometry;
+      const position = geometry.getAttribute("position");
+      if (!position) continue;
 
-      const component: number[] = [];
-      const queue = [start];
-      visited.add(start);
-      while (queue.length > 0) {
-        const triangleIndex = queue.shift();
-        if (triangleIndex == null) continue;
-        component.push(triangleIndex);
+      const index = geometry.index;
+      const totalEntries = index?.count ?? position.count;
+      const groups = geometry.groups.length > 0 ? geometry.groups : [{ start: 0, count: totalEntries }];
 
-        for (const vertexId of triangleVertexIds[triangleIndex]) {
-          for (const neighbor of vertexToTriangles.get(vertexId) ?? []) {
-            if (visited.has(neighbor)) continue;
-            visited.add(neighbor);
-            queue.push(neighbor);
+      for (const group of groups) {
+        for (let offset = group.start; offset < group.start + group.count; offset += 3) {
+          if (this.isTriangleHidden(mesh, offset)) continue;
+
+          const a = this.projectVertexToScreen(mesh, index?.getX(offset) ?? offset, rect);
+          const b = this.projectVertexToScreen(mesh, index?.getX(offset + 1) ?? offset + 1, rect);
+          const c = this.projectVertexToScreen(mesh, index?.getX(offset + 2) ?? offset + 2, rect);
+          if (!a || !b || !c) continue;
+
+          const distance = this.pointTriangleDistance(point, a.screen, b.screen, c.screen);
+          if (distance > threshold) continue;
+
+          const ndcZ = Math.min(a.ndcZ, b.ndcZ, c.ndcZ);
+          if (
+            !best ||
+            distance < best.screenDistance - 0.5 ||
+            (Math.abs(distance - best.screenDistance) <= 0.5 && ndcZ < best.ndcZ)
+          ) {
+            best = {
+              mesh,
+              faceOffset: offset,
+              ndcZ,
+              screenDistance: distance
+            };
           }
         }
       }
-      components.push(component);
     }
 
-    const selectedComponentIndex = components.findIndex((component) => component.includes(clickedTriangleIndex));
-    const selectedComponent = components[selectedComponentIndex];
-    if (!selectedComponent) return undefined;
+    return best;
+  }
 
-    const selectedOffsets = selectedComponent.flatMap((triangleIndex) => {
-      const offset = triangleOffsets[triangleIndex];
-      return offset == null ? [] : [offset];
-    });
-    const selectedVertices = new Set<number>();
-    for (const offset of selectedOffsets) {
-      selectedVertices.add(weldedIdFor(sourceVertex(offset)));
-      selectedVertices.add(weldedIdFor(sourceVertex(offset + 1)));
-      selectedVertices.add(weldedIdFor(sourceVertex(offset + 2)));
+  private isTriangleHidden(mesh: Mesh, offset: number): boolean {
+    for (const record of this.geometryIslands.values()) {
+      if (record.mesh === mesh && record.info.hidden && record.triangleOffsets.includes(offset)) {
+        return true;
+      }
     }
+    return false;
+  }
 
-    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    const materialIndex = group.materialIndex ?? 0;
-    const material = materials[materialIndex];
+  private projectVertexToScreen(
+    mesh: Mesh,
+    vertexIndex: number,
+    rect: DOMRect
+  ): { screen: Vector2; ndcZ: number } | undefined {
+    const position = mesh.geometry.getAttribute("position") as BufferAttribute | undefined;
+    if (!position || vertexIndex < 0 || vertexIndex >= position.count) return undefined;
+
+    const vertex = new Vector3().fromBufferAttribute(position, vertexIndex);
+    if (mesh instanceof SkinnedMesh) {
+      mesh.applyBoneTransform(vertexIndex, vertex);
+    }
+    mesh.localToWorld(vertex);
+    vertex.project(this.camera);
+    if (vertex.z < -1 || vertex.z > 1) return undefined;
 
     return {
-      materialIndex,
-      materialName: material?.name || `Material ${materialIndex + 1}`,
-      islandIndex: selectedComponentIndex + 1,
-      islandCount: components.length,
-      faceCount: selectedOffsets.length,
-      vertexCount: selectedVertices.size,
-      triangleOffsets: selectedOffsets
+      screen: new Vector2(((vertex.x + 1) / 2) * rect.width + rect.left, ((-vertex.y + 1) / 2) * rect.height + rect.top),
+      ndcZ: vertex.z
     };
+  }
+
+  private pointTriangleDistance(point: Vector2, a: Vector2, b: Vector2, c: Vector2): number {
+    if (this.pointInTriangle(point, a, b, c)) return 0;
+    return Math.min(
+      this.pointSegmentDistance(point, a, b),
+      this.pointSegmentDistance(point, b, c),
+      this.pointSegmentDistance(point, c, a)
+    );
+  }
+
+  private pointInTriangle(point: Vector2, a: Vector2, b: Vector2, c: Vector2): boolean {
+    const area = (p1: Vector2, p2: Vector2, p3: Vector2) =>
+      (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+    const d1 = area(point, a, b);
+    const d2 = area(point, b, c);
+    const d3 = area(point, c, a);
+    const hasNegative = d1 < 0 || d2 < 0 || d3 < 0;
+    const hasPositive = d1 > 0 || d2 > 0 || d3 > 0;
+    return !(hasNegative && hasPositive);
+  }
+
+  private pointSegmentDistance(point: Vector2, a: Vector2, b: Vector2): number {
+    const segment = b.clone().sub(a);
+    const lengthSq = segment.lengthSq();
+    if (lengthSq === 0) return point.distanceTo(a);
+
+    const t = Math.max(0, Math.min(1, point.clone().sub(a).dot(segment) / lengthSq));
+    return point.distanceTo(a.clone().add(segment.multiplyScalar(t)));
   }
 
   private showIslandHighlight(mesh: Mesh, triangleOffsets: number[]): void {
@@ -804,6 +1035,92 @@ export class GltfViewer {
     group.quaternion.copy(mesh.quaternion);
     group.scale.copy(mesh.scale);
     this.islandHighlight = group;
+  }
+
+  private rebuildHiddenGeometry(mesh: Mesh): void {
+    const state = this.ensureMeshGroupState(mesh);
+    const hiddenOffsets = new Set<number>();
+
+    for (const record of this.geometryIslands.values()) {
+      if (record.mesh !== mesh || !record.info.hidden) continue;
+      for (const offset of record.triangleOffsets) {
+        hiddenOffsets.add(offset);
+      }
+    }
+
+    const geometry = mesh.geometry;
+    geometry.clearGroups();
+
+    if (hiddenOffsets.size === 0) {
+      for (const group of state.originalGroups) {
+        geometry.addGroup(group.start, group.count, group.materialIndex ?? 0);
+      }
+      mesh.material = state.originalMaterial;
+      return;
+    }
+
+    const hiddenMaterialIndex = state.materials.length;
+    mesh.material = [...state.materials, state.hiddenMaterial];
+
+    for (const group of state.originalGroups) {
+      const groupEnd = group.start + group.count;
+      let runStart = group.start;
+      let runHidden = hiddenOffsets.has(group.start);
+
+      for (let offset = group.start + 3; offset < groupEnd; offset += 3) {
+        const isHidden = hiddenOffsets.has(offset);
+        if (isHidden === runHidden) continue;
+
+        this.addGeometryGroup(geometry, runStart, offset - runStart, runHidden ? hiddenMaterialIndex : group.materialIndex ?? 0);
+        runStart = offset;
+        runHidden = isHidden;
+      }
+
+      this.addGeometryGroup(geometry, runStart, groupEnd - runStart, runHidden ? hiddenMaterialIndex : group.materialIndex ?? 0);
+    }
+  }
+
+  private ensureMeshGroupState(mesh: Mesh): MeshGroupState {
+    const existing = this.meshGroupStates.get(mesh);
+    if (existing) return existing;
+
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+    const totalEntries = geometry.index?.count ?? position?.count ?? 0;
+    const originalGroups =
+      geometry.groups.length > 0
+        ? geometry.groups.map((group) => ({
+            start: group.start,
+            count: group.count,
+            materialIndex: group.materialIndex
+          }))
+        : [
+            {
+              start: 0,
+              count: totalEntries,
+              materialIndex: 0
+            }
+          ];
+    const materials = Array.isArray(mesh.material) ? [...mesh.material] : [mesh.material];
+    const state: MeshGroupState = {
+      originalGroups,
+      originalMaterial: mesh.material,
+      materials,
+      hiddenMaterial: new MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false
+      })
+    };
+
+    this.meshGroupStates.set(mesh, state);
+    return state;
+  }
+
+  private addGeometryGroup(geometry: BufferGeometry, start: number, count: number, materialIndex: number): void {
+    if (count <= 0) return;
+    geometry.addGroup(start, count, materialIndex);
   }
 
   private createIslandGeometry(source: BufferGeometry, triangleOffsets: number[]): BufferGeometry {

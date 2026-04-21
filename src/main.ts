@@ -153,13 +153,15 @@ app.innerHTML = `
 const library = new LocalAssetLibrary();
 const canvas = query<HTMLCanvasElement>("#viewerCanvas");
 let currentGeometrySelection: GeometrySelectionInfo | null = null;
+let loadedNodes: NodeInspectorInfo[] = [];
+const highlightedNodeIds = new Set<number>();
 const viewer = new GltfViewer({
   canvas,
   onPlayback: updatePlayback,
   onGeometrySelection: (selection) => {
     const hadSelection = currentGeometrySelection != null;
     currentGeometrySelection = selection;
-    renderGeometrySelection();
+    renderNodes(loadedNodes);
     if (selection) {
       setAccordionExpanded("nodes", true);
       setStatus({
@@ -253,6 +255,8 @@ clearLibraryButton.addEventListener("click", () => {
   library.clear();
   viewer.unloadModel();
   selectedAssetId = "";
+  loadedNodes = [];
+  highlightedNodeIds.clear();
   selectedName.textContent = "No model loaded";
   selectedPath.textContent = "Pick a GLB or glTF file to begin.";
   renderAssets();
@@ -285,11 +289,17 @@ nodeList.addEventListener("click", (event) => {
   }
 
   if (button.dataset.nodeAction === "highlight") {
-    const isHighlighted = button.getAttribute("aria-pressed") === "true";
+    const isHighlighted = highlightedNodeIds.has(nodeId);
     const nextHighlighted = !isHighlighted;
     if (!viewer.setNodeHighlighted(nodeId, nextHighlighted)) return;
 
+    if (nextHighlighted) {
+      highlightedNodeIds.add(nodeId);
+    } else {
+      highlightedNodeIds.delete(nodeId);
+    }
     button.setAttribute("aria-pressed", String(nextHighlighted));
+    button.textContent = nextHighlighted ? "Unhighlight" : "Highlight";
     setStatus({ label: nextHighlighted ? "Node highlighted" : "Highlight removed", tone: "idle" });
   }
 });
@@ -302,7 +312,7 @@ nodeList.addEventListener("input", (event) => {
   const materialIndex = Number(input.dataset.materialIndex);
   if (!Number.isFinite(nodeId) || !Number.isFinite(materialIndex)) return;
 
-    if (!viewer.setMaterialColor(nodeId, materialIndex, input.value)) return;
+  if (!viewer.setMaterialColor(nodeId, materialIndex, input.value)) return;
 
   const row = input.closest<HTMLElement>(".material-row");
   row?.querySelector<HTMLElement>(".material-swatch")?.style.setProperty("--swatch", input.value);
@@ -318,6 +328,46 @@ nodeList.addEventListener("click", (event) => {
 
   if (button.dataset.selectionAction === "clear") {
     viewer.clearGeometrySelection();
+  }
+
+  if (button.dataset.selectionAction === "toggle-visibility" && currentGeometrySelection) {
+    const nextHidden = !currentGeometrySelection.hidden;
+    if (!viewer.setGeometrySelectionHidden(currentGeometrySelection.id, nextHidden)) return;
+    currentGeometrySelection = viewer.getGeometryIslands().find((selection) => selection.id === currentGeometrySelection?.id) ?? null;
+    renderNodes(loadedNodes);
+    setStatus({ label: nextHidden ? "Selection hidden" : "Selection shown", tone: "idle" });
+  }
+});
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-island-action]");
+  if (!button) return;
+
+  const selectionId = button.dataset.selectionId;
+  if (!selectionId) return;
+
+  const selection = viewer.getGeometryIslands().find((item) => item.id === selectionId);
+  if (!selection) return;
+
+  if (button.dataset.islandAction === "visible") {
+    const nextHidden = !selection.hidden;
+    if (!viewer.setGeometrySelectionHidden(selectionId, nextHidden)) return;
+    currentGeometrySelection = viewer.getGeometryIslands().find((item) => item.id === currentGeometrySelection?.id) ?? currentGeometrySelection;
+    renderNodes(loadedNodes);
+    setStatus({ label: nextHidden ? "Island hidden" : "Island shown", detail: selection.materialName, tone: "idle" });
+  }
+
+  if (button.dataset.islandAction === "highlight") {
+    if (currentGeometrySelection?.id === selectionId) {
+      viewer.clearGeometrySelection();
+      setStatus({ label: "Island highlight removed", detail: selection.materialName, tone: "idle" });
+      return;
+    }
+
+    if (!viewer.highlightGeometrySelection(selectionId)) return;
+    setStatus({ label: "Island highlighted", detail: selection.materialName, tone: "ok" });
   }
 });
 
@@ -503,6 +553,7 @@ function filteredAssets(): LocalAsset[] {
 async function loadAsset(asset: LocalAsset): Promise<void> {
   selectedAssetId = asset.id;
   currentGeometrySelection = null;
+  highlightedNodeIds.clear();
   renderAssets();
   selectedName.textContent = asset.name;
   selectedPath.textContent = asset.path;
@@ -513,6 +564,7 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
     renderLoadedModel(model);
     setStatus({ label: "Model loaded", detail: `${model.stats.meshes} meshes, ${model.clips.length} clips`, tone: "ok" });
   } catch (error) {
+    loadedNodes = [];
     renderStats();
     renderNodes([]);
     renderClips([]);
@@ -525,6 +577,7 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
 }
 
 function renderLoadedModel(model: LoadedModel): void {
+  loadedNodes = model.nodes;
   renderStats(model.stats);
   renderNodes(model.nodes);
   renderClips(model.clips.map((clip) => clip.name || "Unnamed clip"));
@@ -589,12 +642,60 @@ function renderNodes(nodes: NodeInspectorInfo[]): void {
     const tags = node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
     const transform = node.transform.map((value) => `<li>${escapeHtml(value)}</li>`).join("");
     const isMesh = node.tags.includes("mesh");
+    const geometryIslands = viewer.getGeometryIslands().filter((island) => island.nodeId === node.id);
     const actions = isMesh
       ? `
         <div class="node-actions">
           <button type="button" data-node-action="visible" data-node-id="${node.id}" aria-pressed="${node.visible}">${node.visible ? "Hide" : "Show"}</button>
-          <button type="button" data-node-action="highlight" data-node-id="${node.id}" aria-pressed="false">Highlight</button>
+          <button type="button" data-node-action="highlight" data-node-id="${node.id}" aria-pressed="${highlightedNodeIds.has(node.id)}">${
+            highlightedNodeIds.has(node.id) ? "Unhighlight" : "Highlight"
+          }</button>
         </div>
+      `
+      : "";
+    const geometryIslandList = isMesh
+      ? `
+        <details class="node-subsection" ${currentGeometrySelection?.nodeId === node.id ? "open" : ""}>
+          <summary>Geometry islands (${geometryIslands.length})</summary>
+          ${
+            geometryIslands.length > 0
+              ? `
+                <div class="island-list">
+                  ${geometryIslands
+                    .map(
+                      (selection) => `
+                        <div class="island-row ${selection.hidden ? "is-hidden" : ""} ${
+                          currentGeometrySelection?.id === selection.id ? "is-selected" : ""
+                        }">
+                          <div>
+                            <strong>${escapeHtml(selection.materialName)} island ${selection.islandIndex}</strong>
+                            <span>${selection.faceCount.toLocaleString()} faces · ${selection.vertexCount.toLocaleString()} verts · ${
+                              selection.hidden ? "hidden" : "visible"
+                            }${currentGeometrySelection?.id === selection.id ? " · selected" : ""}</span>
+                          </div>
+                          <div class="island-actions">
+                            <button
+                              type="button"
+                              data-island-action="visible"
+                              data-selection-id="${selection.id}"
+                              aria-pressed="${!selection.hidden}"
+                            >${selection.hidden ? "Show" : "Hide"}</button>
+                            <button
+                              type="button"
+                              data-island-action="highlight"
+                              data-selection-id="${selection.id}"
+                              aria-pressed="${currentGeometrySelection?.id === selection.id}"
+                            >${currentGeometrySelection?.id === selection.id ? "Unhighlight" : "Highlight"}</button>
+                          </div>
+                        </div>
+                      `
+                    )
+                    .join("")}
+                </div>
+              `
+              : `<div class="empty-state compact">No triangle islands found for this mesh.</div>`
+          }
+        </details>
       `
       : "";
     const geometry = node.geometry
@@ -655,6 +756,7 @@ function renderNodes(nodes: NodeInspectorInfo[]): void {
         ${geometry}
         ${transform ? `<ul class="node-transform">${transform}</ul>` : ""}
         ${materials}
+        ${geometryIslandList}
       </div>
     `;
 
@@ -681,8 +783,12 @@ function renderGeometrySelection(): void {
       <span>Island ${currentGeometrySelection.islandIndex} of ${currentGeometrySelection.islandCount}</span>
       <span>${currentGeometrySelection.faceCount.toLocaleString()} faces</span>
       <span>${currentGeometrySelection.vertexCount.toLocaleString()} welded verts</span>
+      <span>${currentGeometrySelection.hidden ? "hidden" : "visible"}</span>
     </div>
-    <button type="button" data-selection-action="clear">Clear selection</button>
+    <div class="selection-actions">
+      <button type="button" data-selection-action="toggle-visibility">${currentGeometrySelection.hidden ? "Show selection" : "Hide selection"}</button>
+      <button type="button" data-selection-action="clear">Clear selection</button>
+    </div>
   `;
 }
 
