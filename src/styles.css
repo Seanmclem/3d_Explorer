@@ -401,6 +401,29 @@ h3 {
   gap: 8px;
 }
 
+.node-filter-bar {
+  display: grid;
+  gap: 8px;
+}
+
+.filter-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-chip-row button {
+  min-height: 28px;
+  padding: 5px 8px;
+  color: #c2d4c9;
+  font-size: 0.74rem;
+}
+
+.filter-chip-row button[aria-pressed="true"] {
+  border-color: #19c37d;
+  background: #173527;
+}
+
 .node-summary {
   display: flex;
   flex-wrap: wrap;
@@ -475,11 +498,13 @@ h3 {
   opacity: 0.62;
 }
 
+.node-item.is-node-focused {
+  border-color: #19c37d;
+}
+
 .node-item summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
+  gap: 6px;
   min-height: 36px;
   padding: 8px 9px 8px calc(9px + var(--node-indent, 0px));
   cursor: pointer;
@@ -488,13 +513,25 @@ h3 {
 .node-title {
   min-width: 0;
   overflow-wrap: anywhere;
+  line-height: 1.2;
   font-weight: 800;
 }
 
 .node-type {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 4px;
   color: #a8b9af;
   font-size: 0.72rem;
   font-weight: 800;
+}
+
+.node-type span {
+  border: 1px solid #26302a;
+  border-radius: 8px;
+  padding: 2px 5px;
+  background: #0f1813;
 }
 
 .node-details {
@@ -565,19 +602,26 @@ h3 {
   font-weight: 800;
 }
 
-.island-list {
+.node-subsection-content {
   display: grid;
-  gap: 7px;
+  gap: 8px;
   border-top: 1px solid #26302a;
   padding: 8px;
 }
 
+.island-list {
+  display: grid;
+  gap: 5px;
+}
+
 .island-row {
   display: grid;
-  gap: 7px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
   border: 1px solid #26302a;
   border-radius: 8px;
-  padding: 8px;
+  padding: 6px 7px;
   background: #111511;
 }
 
@@ -605,7 +649,18 @@ h3 {
 .island-actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 7px;
+}
+
+.island-actions button {
+  min-height: 28px;
+  padding: 5px 7px;
+}
+
+.island-actions button[aria-pressed="true"] {
+  border-color: #19c37d;
+  background: #173527;
 }
 
 .node-materials {

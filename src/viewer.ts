@@ -225,7 +225,8 @@ export class GltfViewer {
     this.fitCameraToObject(root);
 
     if (this.clips.length > 0) {
-      this.playClip(0);
+      const idleClipIndex = this.clips.findIndex((clip) => clip.name.toLowerCase().includes("idle"));
+      this.playClip(idleClipIndex >= 0 ? idleClipIndex : 0);
       this.setPaused(false);
     } else {
       this.emitPlayback();
