@@ -82,8 +82,43 @@ export type GeometrySelectionInfo = {
   hidden: boolean;
 };
 
+export type AnimationTimelineTrack = {
+  id: string;
+  targetLabel: string;
+  targetGroup: string;
+  targetContext?: string;
+  propertyLabel: string;
+  bindingPath: string;
+  keyCount: number;
+  keyTimes: number[];
+  interpolation: string;
+  valueType: string;
+  valueSize: number;
+};
+
+export type AnimationTimelineGroup = {
+  id: string;
+  label: string;
+  context?: string;
+  trackCount: number;
+  keyCount: number;
+  tracks: AnimationTimelineTrack[];
+};
+
+export type AnimationTimelineClip = {
+  id: string;
+  index: number;
+  name: string;
+  duration: number;
+  blendMode: "normal" | "additive";
+  trackCount: number;
+  keyCount: number;
+  groups: AnimationTimelineGroup[];
+};
+
 export type LoadedModel = {
   clips: AnimationClip[];
+  timelineClips: AnimationTimelineClip[];
   stats: ModelStats;
   nodes: NodeInspectorInfo[];
 };

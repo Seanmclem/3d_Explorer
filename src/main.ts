@@ -3,6 +3,9 @@ import { GltfViewer } from "./viewer";
 import type { EditorMode, PrimitiveKind } from "./viewer";
 import { LocalAssetLibrary, supportsDirectoryPicker, supportsFilePicker } from "./localAssets";
 import type {
+  AnimationTimelineClip,
+  AnimationTimelineGroup,
+  AnimationTimelineTrack,
   GeometrySelectionInfo,
   LoadedModel,
   LoadStatus,
@@ -102,6 +105,7 @@ app.innerHTML = `
         <button id="toggleGrid" type="button" aria-pressed="true">Grid</button>
         <button id="toggleBounds" type="button" aria-pressed="true">Bounds</button>
         <button id="toggleWireframe" type="button" aria-pressed="false">Wire</button>
+        <button id="toggleTimelineDockTop" type="button" aria-pressed="true">Timeline</button>
         <button id="capturePng" type="button">PNG</button>
       </div>
 
@@ -146,22 +150,60 @@ app.innerHTML = `
             <span class="accordion-caret" aria-hidden="true"></span>
           </button>
           <div class="accordion-content" id="accordion-animations">
-            <div class="section-title-row">
-              <span class="section-title">Clips</span>
-              <button id="togglePlay" type="button">Play</button>
+            <div class="animation-sidebar-summary">
+              <p class="section-caption" id="animationSummary">No animation clips loaded.</p>
+              <div class="animation-sidebar-actions">
+                <button id="toggleTimelineDockSide" type="button" aria-pressed="true">Hide timeline</button>
+              </div>
             </div>
-            <div class="clip-list" id="clipList"></div>
-            <label class="field-label" for="timeline">Timeline</label>
-            <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
-            <div class="time-row">
-              <span id="clipTime">0.00s</span>
-              <span id="clipDuration">0.00s</span>
-            </div>
-            <label class="field-label" for="speed">Playback speed</label>
-            <input id="speed" type="range" min="0" max="2" step="0.05" value="1" />
           </div>
         </section>
       </aside>
+
+      <section class="timeline-dock" id="timelineDock" aria-label="Animation timeline">
+        <div class="timeline-dock-header">
+          <div class="timeline-transport">
+            <button id="jumpStart" type="button">Start</button>
+            <button id="stepBack" type="button">Back</button>
+            <button id="togglePlay" type="button">Play</button>
+            <button id="stepForward" type="button">Next</button>
+            <button id="jumpEnd" type="button">End</button>
+          </div>
+          <div class="timeline-readout">
+            <strong id="frameReadout">0000 / 0000</strong>
+            <span id="fpsReadout">24 fps</span>
+            <span id="clipTime">0.00s</span>
+            <span id="clipDuration">0.00s</span>
+          </div>
+          <div class="timeline-header-actions">
+            <button id="toggleTimelineDock" type="button" aria-pressed="true">Hide timeline</button>
+          </div>
+        </div>
+        <div class="timeline-dock-subheader">
+          <div class="timeline-current-clip">
+            <span class="section-title">Clip</span>
+            <strong id="activeClipName">No animation</strong>
+            <span id="trackSummary">Open a model with animation clips to inspect channels and keys.</span>
+          </div>
+          <label class="timeline-speed-control" for="speed">
+            <span class="field-label">Playback speed</span>
+            <input id="speed" type="range" min="0" max="2" step="0.05" value="1" />
+          </label>
+          <div class="timeline-mode-strip" aria-label="Timeline mode">
+            <button type="button" aria-pressed="true">Dope Sheet</button>
+            <button type="button" disabled>Curves</button>
+          </div>
+        </div>
+        <div class="timeline-clip-strip" id="clipList"></div>
+        <input id="timeline" class="timeline-scrubber" type="range" min="0" max="1" step="0.001" value="0" aria-label="Timeline scrubber" />
+        <div class="timeline-sheet" id="timelinePanel">
+          <div class="timeline-sheet-header">
+            <div class="timeline-sheet-label-head">Channels</div>
+            <div class="timeline-ruler" id="timelineRuler"></div>
+          </div>
+          <div class="timeline-track-groups" id="trackGroupList"></div>
+        </div>
+      </section>
     </section>
   </main>
 `;
@@ -206,6 +248,7 @@ const viewer = new GltfViewer({
     }
   }
 });
+const TIMELINE_FPS = 24;
 
 const pickFolderButton = query<HTMLButtonElement>("#pickFolder");
 const pickFilesButton = query<HTMLButtonElement>("#pickFiles");
@@ -223,14 +266,32 @@ const selectedPath = query<HTMLElement>("#selectedPath");
 const statsGrid = query<HTMLElement>("#statsGrid");
 const nodeList = query<HTMLElement>("#nodeList");
 const clipList = query<HTMLElement>("#clipList");
+const animationSummary = query<HTMLElement>("#animationSummary");
+const activeClipName = query<HTMLElement>("#activeClipName");
 const togglePlayButton = query<HTMLButtonElement>("#togglePlay");
+const toggleTimelineDockButton = query<HTMLButtonElement>("#toggleTimelineDock");
+const toggleTimelineDockTopButton = query<HTMLButtonElement>("#toggleTimelineDockTop");
+const toggleTimelineDockSideButton = query<HTMLButtonElement>("#toggleTimelineDockSide");
 const timeline = query<HTMLInputElement>("#timeline");
 const clipTime = query<HTMLElement>("#clipTime");
 const clipDuration = query<HTMLElement>("#clipDuration");
+const frameReadout = query<HTMLElement>("#frameReadout");
+const fpsReadout = query<HTMLElement>("#fpsReadout");
 const speed = query<HTMLInputElement>("#speed");
+const timelineDock = query<HTMLElement>("#timelineDock");
+const timelinePanel = query<HTMLElement>("#timelinePanel");
+const timelineRuler = query<HTMLElement>("#timelineRuler");
+const trackGroupList = query<HTMLElement>("#trackGroupList");
+const trackSummary = query<HTMLElement>("#trackSummary");
+const jumpStartButton = query<HTMLButtonElement>("#jumpStart");
+const stepBackButton = query<HTMLButtonElement>("#stepBack");
+const stepForwardButton = query<HTMLButtonElement>("#stepForward");
+const jumpEndButton = query<HTMLButtonElement>("#jumpEnd");
 
 let selectedAssetId = "";
 let currentAsset: LocalAsset | null = null;
+let timelineDockVisible = true;
+let timelineClips: AnimationTimelineClip[] = [];
 let currentPlayback: PlaybackState = {
   activeClipIndex: -1,
   clipName: "No animation",
@@ -637,12 +698,48 @@ togglePlayButton.addEventListener("click", () => {
   viewer.togglePlay();
 });
 
+toggleTimelineDockButton.addEventListener("click", () => {
+  setTimelineDockVisible(!timelineDockVisible);
+});
+
+toggleTimelineDockTopButton.addEventListener("click", () => {
+  setTimelineDockVisible(!timelineDockVisible);
+});
+
+toggleTimelineDockSideButton.addEventListener("click", () => {
+  setTimelineDockVisible(!timelineDockVisible);
+});
+
+jumpStartButton.addEventListener("click", () => {
+  viewer.setPaused(true);
+  viewer.scrub(0);
+});
+
+stepBackButton.addEventListener("click", () => {
+  viewer.setPaused(true);
+  viewer.scrub(Math.max(0, currentPlayback.time - 1 / TIMELINE_FPS));
+});
+
+stepForwardButton.addEventListener("click", () => {
+  viewer.setPaused(true);
+  viewer.scrub(Math.min(currentPlayback.duration, currentPlayback.time + 1 / TIMELINE_FPS));
+});
+
+jumpEndButton.addEventListener("click", () => {
+  viewer.setPaused(true);
+  viewer.scrub(currentPlayback.duration);
+});
+
 timeline.addEventListener("pointerdown", () => {
   isScrubbing = true;
   viewer.setPaused(true);
 });
 
 timeline.addEventListener("pointerup", () => {
+  isScrubbing = false;
+});
+
+timeline.addEventListener("pointercancel", () => {
   isScrubbing = false;
 });
 
@@ -663,6 +760,7 @@ renderAssets();
 renderStats();
 renderNodes([]);
 renderClips([]);
+renderTimelineDockVisibility();
 
 function query<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -806,7 +904,7 @@ function renderLoadedModel(model: LoadedModel): void {
   deletedNodeOverrides.clear();
   renderStats(model.stats);
   renderNodes(model.nodes);
-  renderClips(model.clips.map((clip) => clip.name || "Unnamed clip"));
+  renderClips(model.timelineClips);
 }
 
 function renderStats(stats?: ModelStats): void {
@@ -1586,43 +1684,276 @@ function materialLabel(material: NodeInspectorInfo["materials"][number]): string
   return escapeHtml(parts.join(" + "));
 }
 
-function renderClips(clips: string[]): void {
+function renderClips(clips: AnimationTimelineClip[]): void {
+  timelineClips = clips;
   clipList.innerHTML = "";
+  trackGroupList.innerHTML = "";
+  timelineRuler.innerHTML = "";
 
   if (clips.length === 0) {
+    animationSummary.textContent = "No animation clips loaded.";
+    activeClipName.textContent = "No animation";
     clipList.innerHTML = `<div class="empty-state compact">No animation clips in this model.</div>`;
+    trackGroupList.innerHTML = `<div class="empty-state compact">The active clip’s animated channels and keyframes appear here.</div>`;
+    trackSummary.textContent = "Open a model with animation clips to inspect channels and keys.";
     timeline.value = "0";
     timeline.max = "1";
     clipTime.textContent = "0.00s";
     clipDuration.textContent = "0.00s";
+    frameReadout.textContent = "0000 / 0000";
+    fpsReadout.textContent = `${TIMELINE_FPS} fps`;
     togglePlayButton.disabled = true;
+    jumpStartButton.disabled = true;
+    stepBackButton.disabled = true;
+    stepForwardButton.disabled = true;
+    jumpEndButton.disabled = true;
+    timeline.disabled = true;
+    speed.disabled = true;
+    toggleTimelineDockButton.disabled = false;
+    renderTimelineDockVisibility();
     return;
   }
 
+  const totalTracks = clips.reduce((sum, clip) => sum + clip.trackCount, 0);
+  const totalKeys = clips.reduce((sum, clip) => sum + clip.keyCount, 0);
+  animationSummary.textContent = `${clips.length} clip${clips.length === 1 ? "" : "s"} · ${totalTracks.toLocaleString()} channels · ${totalKeys.toLocaleString()} keys`;
+
   togglePlayButton.disabled = false;
+  jumpStartButton.disabled = false;
+  stepBackButton.disabled = false;
+  stepForwardButton.disabled = false;
+  jumpEndButton.disabled = false;
+  timeline.disabled = false;
+  speed.disabled = false;
+  toggleTimelineDockButton.disabled = false;
 
   clips.forEach((clip, index) => {
     const button = document.createElement("button");
-    button.className = "clip-row";
+    button.className = "timeline-clip-tab";
     button.type = "button";
-    button.textContent = clip;
     button.setAttribute("aria-pressed", String(index === currentPlayback.activeClipIndex));
+    button.innerHTML = `
+      <strong>${escapeHtml(clip.name)}</strong>
+      <span>${clip.duration.toFixed(2)}s · ${clip.trackCount} channels</span>
+    `;
     button.addEventListener("click", () => viewer.playClip(index));
     clipList.append(button);
   });
+
+  renderTimelineDetails();
+  renderTimelineDockVisibility();
+  syncTimelinePlayheads();
 }
 
 function updatePlayback(state: PlaybackState): void {
+  const previousActiveClipIndex = currentPlayback.activeClipIndex;
   currentPlayback = state;
   togglePlayButton.textContent = state.isPlaying ? "Pause" : "Play";
   timeline.max = String(Math.max(state.duration, 0.001));
   if (!isScrubbing) timeline.value = String(state.time);
   clipTime.textContent = `${state.time.toFixed(2)}s`;
   clipDuration.textContent = `${state.duration.toFixed(2)}s`;
+  frameReadout.textContent = `${formatFrame(state.time)} / ${formatFrame(state.duration)}`;
+  fpsReadout.textContent = `${TIMELINE_FPS} fps`;
 
-  for (const [index, button] of Array.from(clipList.querySelectorAll("button")).entries()) {
+  for (const [index, button] of Array.from(clipList.querySelectorAll<HTMLButtonElement>("button")).entries()) {
     button.setAttribute("aria-pressed", String(index === state.activeClipIndex));
   }
+
+  if (previousActiveClipIndex !== state.activeClipIndex) {
+    renderTimelineDetails();
+  }
+
+  syncTimelinePlayheads();
+}
+
+function setTimelineDockVisible(visible: boolean): void {
+  timelineDockVisible = visible;
+  renderTimelineDockVisibility();
+}
+
+function renderTimelineDockVisibility(): void {
+  timelineDock.classList.toggle("is-collapsed", !timelineDockVisible);
+  dropTarget.classList.toggle("timeline-dock-open", timelineDockVisible);
+
+  const label = timelineDockVisible ? "Hide timeline" : "Show timeline";
+  for (const button of [toggleTimelineDockButton, toggleTimelineDockTopButton, toggleTimelineDockSideButton]) {
+    button.setAttribute("aria-pressed", String(timelineDockVisible));
+    button.textContent = button === toggleTimelineDockTopButton ? "Timeline" : label;
+  }
+}
+
+function renderTimelineDetails(): void {
+  trackGroupList.innerHTML = "";
+  timelineRuler.innerHTML = "";
+
+  if (timelineClips.length === 0) return;
+
+  const activeClip =
+    timelineClips.find((clip) => clip.index === currentPlayback.activeClipIndex) ??
+    timelineClips[0];
+  const activeDuration = Math.max(activeClip.duration, 0.001);
+  activeClipName.textContent = activeClip.name;
+
+  timelineRuler.append(renderTimelineRuler(activeDuration));
+
+  trackSummary.textContent = `${activeClip.trackCount} channels across ${activeClip.groups.length} animated targets`;
+
+  activeClip.groups.forEach((group, groupIndex) => {
+    const details = document.createElement("details");
+    details.className = "timeline-target-group";
+    details.open = isAnimationGroupOpen(activeClip, group, groupIndex);
+    details.dataset.groupKey = animationGroupKey(activeClip, group);
+    details.innerHTML = `
+      <summary>
+        <span class="timeline-target-heading">
+          <strong>${escapeHtml(group.label)}</strong>
+          <span>${escapeHtml(group.context ?? `${group.trackCount} channels`)}</span>
+        </span>
+        <span class="timeline-group-meta">${group.trackCount} channels · ${group.keyCount.toLocaleString()} keys</span>
+      </summary>
+      <div class="timeline-target-rows">
+        ${group.tracks
+          .map((track) => renderTrackRow(track, activeDuration))
+          .join("")}
+      </div>
+    `;
+    const summary = details.querySelector("summary");
+    summary?.addEventListener("click", () => {
+      requestAnimationFrame(() => {
+        openDetailState.set(animationGroupKey(activeClip, group), details.open);
+      });
+    });
+    trackGroupList.append(details);
+  });
+
+  bindTimelineScrubSurfaces();
+}
+
+function renderTimelineRuler(duration: number): HTMLElement {
+  const ruler = document.createElement("div");
+  ruler.className = "timeline-ruler-row";
+  const totalFrames = Math.max(1, Math.round(duration * TIMELINE_FPS));
+  const majorStep = totalFrames <= 48 ? 6 : totalFrames <= 96 ? 12 : 24;
+
+  for (let frame = 0; frame <= totalFrames; frame += majorStep) {
+    const ratio = totalFrames === 0 ? 0 : frame / totalFrames;
+    const tick = document.createElement("span");
+    tick.className = "timeline-ruler-tick";
+    tick.style.left = `${ratio * 100}%`;
+    tick.textContent = String(frame);
+    ruler.append(tick);
+  }
+
+  return ruler;
+}
+
+function renderTrackRow(track: AnimationTimelineTrack, duration: number): string {
+  const ticks = condensedKeyTimes(track.keyTimes, duration)
+    .map(
+      (time) =>
+        `<span class="timeline-key-tick" style="left:${duration <= 0 ? 0 : (time / duration) * 100}%"><span></span></span>`
+    )
+    .join("");
+
+  return `
+    <div class="timeline-sheet-row">
+      <div class="timeline-track-label">
+        <strong>${escapeHtml(track.targetLabel)} · ${escapeHtml(track.propertyLabel)}</strong>
+        <span>${track.keyCount.toLocaleString()} keys · ${escapeHtml(track.interpolation)} · ${escapeHtml(track.valueType)}</span>
+      </div>
+      <button
+        class="timeline-track-rail timeline-scrub-surface"
+        type="button"
+        data-scrub-duration="${duration}"
+        aria-label="Scrub ${escapeHtml(track.targetLabel)} ${escapeHtml(track.propertyLabel)}"
+      >
+        ${ticks}
+        <span class="timeline-playhead"></span>
+      </button>
+    </div>
+  `;
+}
+
+function bindTimelineScrubSurfaces(): void {
+  for (const surface of Array.from(document.querySelectorAll<HTMLElement>(".timeline-scrub-surface"))) {
+    let dragging = false;
+
+    const scrubFromPointer = (event: PointerEvent) => {
+      const duration = Number(surface.dataset.scrubDuration ?? currentPlayback.duration);
+      if (!duration) return;
+
+      const clipIndex = Number(surface.dataset.clipIndex ?? currentPlayback.activeClipIndex);
+      if (Number.isFinite(clipIndex) && clipIndex >= 0 && clipIndex !== currentPlayback.activeClipIndex) {
+        viewer.playClip(clipIndex);
+      }
+
+      const rect = surface.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(rect.width, 1)));
+      viewer.scrub(ratio * duration);
+    };
+
+    surface.addEventListener("pointerdown", (event) => {
+      dragging = true;
+      isScrubbing = true;
+      viewer.setPaused(true);
+      surface.setPointerCapture(event.pointerId);
+      scrubFromPointer(event);
+    });
+
+    surface.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      scrubFromPointer(event);
+    });
+
+    const stopDragging = () => {
+      dragging = false;
+      isScrubbing = false;
+    };
+
+    surface.addEventListener("pointerup", stopDragging);
+    surface.addEventListener("pointercancel", stopDragging);
+    surface.addEventListener("lostpointercapture", stopDragging);
+  }
+}
+
+function syncTimelinePlayheads(): void {
+  for (const surface of Array.from(document.querySelectorAll<HTMLElement>(".timeline-scrub-surface"))) {
+    const duration = Number(surface.dataset.scrubDuration ?? currentPlayback.duration);
+    const left = duration > 0 ? `${(Math.min(currentPlayback.time, duration) / duration) * 100}%` : "0%";
+    const playhead = surface.querySelector<HTMLElement>(".timeline-playhead");
+    if (playhead) {
+      playhead.style.left = left;
+      playhead.hidden = Number(surface.dataset.clipIndex ?? currentPlayback.activeClipIndex) !== currentPlayback.activeClipIndex;
+    }
+  }
+}
+
+function condensedKeyTimes(times: number[], duration: number): number[] {
+  if (times.length <= 1 || duration <= 0) return times;
+
+  const maxVisible = 240;
+  const buckets = new Map<number, number>();
+  for (const time of times) {
+    const bucket = Math.round((time / duration) * maxVisible);
+    if (!buckets.has(bucket)) {
+      buckets.set(bucket, time);
+    }
+  }
+
+  return Array.from(buckets.values()).sort((left, right) => left - right);
+}
+
+function animationGroupKey(clip: AnimationTimelineClip, group: AnimationTimelineGroup): string {
+  return `animation-group:${clip.id}:${group.id}`;
+}
+
+function isAnimationGroupOpen(clip: AnimationTimelineClip, group: AnimationTimelineGroup, index: number): boolean {
+  return openDetailState.get(animationGroupKey(clip, group)) ?? (index < 3 || group.trackCount <= 2);
+}
+
+function formatFrame(time: number): string {
+  return String(Math.max(0, Math.round(time * TIMELINE_FPS))).padStart(4, "0");
 }
 
 function wireToggle(selector: string, callback: (enabled: boolean) => void, initial = false): void {

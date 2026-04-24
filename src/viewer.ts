@@ -1,4 +1,5 @@
 import {
+  AdditiveAnimationBlendMode,
   AmbientLight,
   AnimationAction,
   AnimationClip,
@@ -13,6 +14,9 @@ import {
   DirectionalLight,
   EdgesGeometry,
   GridHelper,
+  InterpolateDiscrete,
+  InterpolateLinear,
+  InterpolateSmooth,
   Group,
   LineBasicMaterial,
   LineSegments,
@@ -35,6 +39,7 @@ import {
   SRGBColorSpace,
   TOUCH,
   Texture,
+  KeyframeTrack,
   Vector2,
   Vector3,
   WebGLRenderer
@@ -45,6 +50,9 @@ import { TransformControls } from "three/examples/jsm/controls/TransformControls
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { GLTF, GLTFReference } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type {
+  AnimationTimelineClip,
+  AnimationTimelineGroup,
+  AnimationTimelineTrack,
   GeometrySelectionInfo,
   LoadedModel,
   LocalAsset,
@@ -352,7 +360,12 @@ export class GltfViewer {
       this.emitPlayback();
     }
 
-    return { clips: this.clips, stats, nodes };
+    return {
+      clips: this.clips,
+      timelineClips: this.describeTimelineClips(this.clips),
+      stats,
+      nodes
+    };
   }
 
   setGridVisible(visible: boolean): void {
@@ -416,6 +429,10 @@ export class GltfViewer {
     const root = this.modelGroup.children[0];
     if (!root) return [];
     return this.describeNodes(root, this.clips);
+  }
+
+  getTimelineClips(): AnimationTimelineClip[] {
+    return this.describeTimelineClips(this.clips);
   }
 
   addPrimitive(kind: PrimitiveKind): NodeInspectorInfo[] {
@@ -1396,6 +1413,140 @@ export class GltfViewer {
     }
 
     return names;
+  }
+
+  private describeTimelineClips(clips: AnimationClip[]): AnimationTimelineClip[] {
+    return clips.map((clip, clipIndex) => {
+      const groupMap = new Map<string, AnimationTimelineGroup>();
+      let totalKeyCount = 0;
+
+      clip.tracks.forEach((track, trackIndex) => {
+        const describedTrack = this.describeTimelineTrack(track, clipIndex, trackIndex);
+        totalKeyCount += describedTrack.keyCount;
+
+        const existingGroup = groupMap.get(describedTrack.targetGroup);
+        if (existingGroup) {
+          existingGroup.trackCount += 1;
+          existingGroup.keyCount += describedTrack.keyCount;
+          existingGroup.tracks.push(describedTrack);
+          return;
+        }
+
+        groupMap.set(describedTrack.targetGroup, {
+          id: `${clipIndex}:${describedTrack.targetGroup}`,
+          label: describedTrack.targetGroup,
+          context: describedTrack.targetContext,
+          trackCount: 1,
+          keyCount: describedTrack.keyCount,
+          tracks: [describedTrack]
+        });
+      });
+
+      return {
+        id: `clip-${clipIndex}`,
+        index: clipIndex,
+        name: clip.name || `Clip ${clipIndex + 1}`,
+        duration: clip.duration,
+        blendMode: clip.blendMode === AdditiveAnimationBlendMode ? "additive" : "normal",
+        trackCount: clip.tracks.length,
+        keyCount: totalKeyCount,
+        groups: Array.from(groupMap.values()).sort((left, right) => {
+          if (right.trackCount !== left.trackCount) return right.trackCount - left.trackCount;
+          return left.label.localeCompare(right.label);
+        })
+      };
+    });
+  }
+
+  private describeTimelineTrack(track: KeyframeTrack, clipIndex: number, trackIndex: number): AnimationTimelineTrack {
+    const binding = this.describeTrackBinding(track.name);
+
+    return {
+      id: `clip-${clipIndex}-track-${trackIndex}`,
+      targetLabel: binding.targetLabel,
+      targetGroup: binding.groupLabel,
+      targetContext: binding.context,
+      propertyLabel: binding.propertyLabel,
+      bindingPath: track.name,
+      keyCount: track.times.length,
+      keyTimes: Array.from(track.times),
+      interpolation: this.interpolationLabel(track.getInterpolation()),
+      valueType: track.ValueTypeName || track.constructor.name.replace("KeyframeTrack", "") || "value",
+      valueSize: track.getValueSize()
+    };
+  }
+
+  private describeTrackBinding(name: string): {
+    targetLabel: string;
+    groupLabel: string;
+    context?: string;
+    propertyLabel: string;
+  } {
+    const boneMatch = /^(.*)\.bones\[([^\]]+)\]\.(.+)$/.exec(name);
+    if (boneMatch) {
+      const [, owner, boneName, property] = boneMatch;
+      return {
+        targetLabel: boneName,
+        groupLabel: boneName,
+        context: owner || undefined,
+        propertyLabel: this.humanizeTrackProperty(property)
+      };
+    }
+
+    const morphMatch = /^(.*)\.morphTargetInfluences(?:\[([^\]]+)\])?$/.exec(name);
+    if (morphMatch) {
+      const [, owner, morphName] = morphMatch;
+      const label = morphName ? `Morph ${morphName}` : owner || "Morph targets";
+      return {
+        targetLabel: label,
+        groupLabel: label,
+        context: owner || undefined,
+        propertyLabel: morphName ? "Morph weight" : "Morph weights"
+      };
+    }
+
+    const lastDot = name.lastIndexOf(".");
+    if (lastDot > 0) {
+      const targetLabel = name.slice(0, lastDot);
+      const propertyLabel = name.slice(lastDot + 1);
+      return {
+        targetLabel,
+        groupLabel: targetLabel,
+        propertyLabel: this.humanizeTrackProperty(propertyLabel)
+      };
+    }
+
+    return {
+      targetLabel: name,
+      groupLabel: name,
+      propertyLabel: "Value"
+    };
+  }
+
+  private humanizeTrackProperty(property: string): string {
+    const trimmed = property.replace(/\[[^\]]+\]/g, "");
+    if (trimmed === "quaternion") return "Rotation";
+    if (trimmed === "position" || trimmed === "translation") return "Position";
+    if (trimmed === "scale") return "Scale";
+    if (trimmed === "weights") return "Weights";
+    if (trimmed === "morphTargetInfluences") return "Morph weights";
+    if (trimmed === "color") return "Color";
+    if (trimmed === "intensity") return "Intensity";
+    if (trimmed === "visible") return "Visibility";
+
+    return trimmed
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/^./, (value) => value.toUpperCase());
+  }
+
+  private interpolationLabel(interpolation: number): string {
+    if (interpolation === InterpolateSmooth) return "Smooth";
+    if (interpolation === InterpolateLinear) return "Linear";
+    if (interpolation === InterpolateDiscrete) return "Step";
+    if (interpolation === 2303) return "Bezier";
+    return "Custom";
   }
 
   private materialSideLabel(side: number): string {
