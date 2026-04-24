@@ -1,5 +1,6 @@
 import "./styles.css";
 import { GltfViewer } from "./viewer";
+import type { EditorMode, PrimitiveKind } from "./viewer";
 import { LocalAssetLibrary, supportsDirectoryPicker, supportsFilePicker } from "./localAssets";
 import type {
   GeometrySelectionInfo,
@@ -10,6 +11,21 @@ import type {
   NodeInspectorInfo,
   PlaybackState
 } from "./types";
+
+type SaveFileWindow = Window & {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+    types?: Array<{
+      description: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<{
+    createWritable?: () => Promise<{
+      write(data: BlobPart): Promise<void>;
+      close(): Promise<void>;
+    }>;
+  }>;
+};
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -156,16 +172,22 @@ let currentGeometrySelection: GeometrySelectionInfo | null = null;
 let loadedNodes: NodeInspectorInfo[] = [];
 const highlightedNodeIds = new Set<number>();
 const nodeVisibilityOverrides = new Map<number, boolean>();
+const deletedNodeOverrides = new Map<number, boolean>();
 const openDetailState = new Map<string, boolean>();
+let selectedNodeId: number | null = null;
+let editorMode = "select";
 let nodeFilterText = "";
 let nodeFilterMode = "all";
 const viewer = new GltfViewer({
   canvas,
   onPlayback: updatePlayback,
+  onSceneEdited: refreshSceneFromViewer,
   onGeometrySelection: (selection) => {
     const hadSelection = currentGeometrySelection != null;
     currentGeometrySelection = selection;
     if (selection) {
+      selectedNodeId = selection.nodeId;
+      viewer.selectNode(selection.nodeId);
       revealGeometrySelection(selection);
     }
     renderNodes(loadedNodes);
@@ -208,6 +230,7 @@ const clipDuration = query<HTMLElement>("#clipDuration");
 const speed = query<HTMLInputElement>("#speed");
 
 let selectedAssetId = "";
+let currentAsset: LocalAsset | null = null;
 let currentPlayback: PlaybackState = {
   activeClipIndex: -1,
   clipName: "No animation",
@@ -265,11 +288,14 @@ clearLibraryButton.addEventListener("click", () => {
   library.clear();
   viewer.unloadModel();
   selectedAssetId = "";
+  currentAsset = null;
   loadedNodes = [];
   highlightedNodeIds.clear();
   nodeVisibilityOverrides.clear();
+  deletedNodeOverrides.clear();
   openDetailState.clear();
   currentGeometrySelection = null;
+  selectedNodeId = null;
   selectedName.textContent = "No model loaded";
   selectedPath.textContent = "Pick a GLB or glTF file to begin.";
   renderAssets();
@@ -289,6 +315,7 @@ nodeList.addEventListener("click", (event) => {
 
   const nodeId = Number(button.dataset.nodeId);
   if (!Number.isFinite(nodeId)) return;
+  selectedNodeId = nodeId;
 
   if (button.dataset.nodeAction === "visible") {
     const isVisible = effectiveNodeVisible(nodeId);
@@ -320,6 +347,94 @@ nodeList.addEventListener("click", (event) => {
   if (button.dataset.nodeAction === "restore") {
     restoreAllVisibility();
   }
+
+  if (button.dataset.nodeAction === "delete") {
+    const nextDeleted = !effectiveNodeDeleted(nodeId);
+    setNodeDeleted(nodeId, nextDeleted);
+    renderNodes(loadedNodes);
+    setStatus({ label: nextDeleted ? "Node deleted" : "Node restored", tone: "idle" });
+  }
+});
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-editor-mode]");
+  if (!button) return;
+
+  editorMode = button.dataset.editorMode ?? "select";
+  viewer.setEditorMode(editorMode as EditorMode);
+  renderNodes(loadedNodes);
+  setStatus({ label: `${modeLabel(editorMode)} mode`, tone: "idle" });
+});
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-add-primitive]");
+  if (!button) return;
+
+  const kind = button.dataset.addPrimitive as PrimitiveKind | undefined;
+  if (!kind) return;
+
+  loadedNodes = viewer.addPrimitive(kind);
+  selectedNodeId = viewer.getSelectedNodeId() ?? selectedNodeId;
+  renderNodes(loadedNodes);
+  setStatus({ label: `${primitiveLabel(kind)} added`, tone: "ok" });
+});
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-history-action]");
+  if (!button) return;
+
+  const changed = button.dataset.historyAction === "undo" ? viewer.undo() : viewer.redo();
+  if (!changed) {
+    setStatus({ label: button.dataset.historyAction === "undo" ? "Nothing to undo" : "Nothing to redo", tone: "idle" });
+    return;
+  }
+
+  refreshSceneFromViewer();
+  setStatus({ label: button.dataset.historyAction === "undo" ? "Undo" : "Redo", tone: "idle" });
+});
+
+nodeList.addEventListener("click", async (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-save-gltf]");
+  if (!button) return;
+
+  await saveGltfEdits();
+});
+
+nodeList.addEventListener("click", async (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-export-glb]");
+  if (!button) return;
+
+  await exportCurrentPreviewGlb();
+});
+
+nodeList.addEventListener("click", async (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-override-glb]");
+  if (!button) return;
+
+  await overrideCurrentGlb();
+});
+
+nodeList.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
+
+  const button = event.target.closest<HTMLButtonElement>("button[data-outliner-node]");
+  if (!button) return;
+
+  const nodeId = Number(button.dataset.outlinerNode);
+  if (!Number.isFinite(nodeId)) return;
+  selectNode(nodeId);
 });
 
 nodeList.addEventListener("input", (event) => {
@@ -340,6 +455,12 @@ nodeList.addEventListener("input", (event) => {
   if (!Number.isFinite(nodeId) || !Number.isFinite(materialIndex)) return;
 
   if (!viewer.setMaterialColor(nodeId, materialIndex, input.value)) return;
+
+  const node = loadedNodes.find((item) => item.id === nodeId);
+  const material = node?.materials.find((item) => item.index === materialIndex);
+  if (material) {
+    material.color = input.value;
+  }
 
   const row = input.closest<HTMLElement>(".material-row");
   row?.querySelector<HTMLElement>(".material-swatch")?.style.setProperty("--swatch", input.value);
@@ -363,6 +484,14 @@ nodeList.addEventListener("click", (event) => {
     currentGeometrySelection = viewer.getGeometryIslands().find((selection) => selection.id === currentGeometrySelection?.id) ?? null;
     renderNodes(loadedNodes);
     setStatus({ label: nextHidden ? "Selection hidden" : "Selection shown", tone: "idle" });
+  }
+
+  if (button.dataset.selectionAction === "delete" && currentGeometrySelection) {
+    const nextHidden = !currentGeometrySelection.hidden;
+    if (!viewer.setGeometrySelectionHidden(currentGeometrySelection.id, nextHidden)) return;
+    currentGeometrySelection = viewer.getGeometryIslands().find((selection) => selection.id === currentGeometrySelection?.id) ?? null;
+    renderNodes(loadedNodes);
+    setStatus({ label: nextHidden ? "Island deleted" : "Island restored", tone: "idle" });
   }
 
   if (button.dataset.selectionAction === "isolate" && currentGeometrySelection) {
@@ -389,6 +518,7 @@ nodeList.addEventListener("click", (event) => {
 
   const selection = viewer.getGeometryIslands().find((item) => item.id === selectionId);
   if (!selection) return;
+  selectedNodeId = selection.nodeId;
 
   if (button.dataset.islandAction === "visible") {
     const nextHidden = !selection.hidden;
@@ -396,6 +526,14 @@ nodeList.addEventListener("click", (event) => {
     currentGeometrySelection = viewer.getGeometryIslands().find((item) => item.id === currentGeometrySelection?.id) ?? currentGeometrySelection;
     renderNodes(loadedNodes);
     setStatus({ label: nextHidden ? "Island hidden" : "Island shown", detail: selection.materialName, tone: "idle" });
+  }
+
+  if (button.dataset.islandAction === "delete") {
+    const nextHidden = !selection.hidden;
+    if (!viewer.setGeometrySelectionHidden(selectionId, nextHidden)) return;
+    currentGeometrySelection = viewer.getGeometryIslands().find((item) => item.id === currentGeometrySelection?.id) ?? currentGeometrySelection;
+    renderNodes(loadedNodes);
+    setStatus({ label: nextHidden ? "Island deleted" : "Island restored", detail: selection.materialName, tone: "idle" });
   }
 
   if (button.dataset.islandAction === "highlight") {
@@ -630,10 +768,13 @@ function filteredAssets(): LocalAsset[] {
 
 async function loadAsset(asset: LocalAsset): Promise<void> {
   selectedAssetId = asset.id;
+  currentAsset = null;
   currentGeometrySelection = null;
   highlightedNodeIds.clear();
   nodeVisibilityOverrides.clear();
+  deletedNodeOverrides.clear();
   openDetailState.clear();
+  selectedNodeId = null;
   renderAssets();
   selectedName.textContent = asset.name;
   selectedPath.textContent = asset.path;
@@ -641,6 +782,7 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
 
   try {
     const model = await viewer.loadAsset(asset, library);
+    currentAsset = asset;
     renderLoadedModel(model);
     setStatus({ label: "Model loaded", detail: `${model.stats.meshes} meshes, ${model.clips.length} clips`, tone: "ok" });
   } catch (error) {
@@ -658,6 +800,10 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
 
 function renderLoadedModel(model: LoadedModel): void {
   loadedNodes = model.nodes;
+  selectedNodeId = null;
+  viewer.selectNode(null);
+  nodeVisibilityOverrides.clear();
+  deletedNodeOverrides.clear();
   renderStats(model.stats);
   renderNodes(model.nodes);
   renderClips(model.clips.map((clip) => clip.name || "Unnamed clip"));
@@ -689,6 +835,7 @@ function renderStats(stats?: ModelStats): void {
 
 function renderNodes(nodes: NodeInspectorInfo[]): void {
   nodeList.innerHTML = "";
+  nodeList.append(renderEditorTools());
 
   const selectionCard = document.createElement("div");
   selectionCard.id = "geometrySelectionCard";
@@ -751,138 +898,220 @@ function renderNodes(nodes: NodeInspectorInfo[]): void {
     return;
   }
 
-  for (const node of visibleNodes) {
-    const item = document.createElement("details");
-    item.className = "node-item";
-    item.dataset.detailKey = nodeKey(node.id);
-    item.dataset.nodeId = String(node.id);
+  if (selectedNodeId != null && !nodes.some((node) => node.id === selectedNodeId)) {
+    selectedNodeId = null;
+    viewer.selectNode(null);
+  }
 
-    const tags = node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
-    const transform = node.transform.map((value) => `<li>${escapeHtml(value)}</li>`).join("");
-    const isMesh = node.tags.includes("mesh");
-    const isVisible = effectiveNodeVisible(node.id);
-    const geometryIslands = allIslands.filter((island) => island.nodeId === node.id);
-    const isFocusedNode = currentGeometrySelection?.nodeId === node.id;
-    item.open = detailOpen(nodeKey(node.id), isMesh || isFocusedNode);
-    item.classList.toggle("is-node-hidden", !isVisible);
-    item.classList.toggle("is-node-focused", isFocusedNode);
+  const outliner = document.createElement("section");
+  outliner.className = "scene-outliner";
+  outliner.innerHTML = `
+    <div class="section-title-row compact">
+      <span class="section-title">Scene outliner</span>
+      <span>${visibleNodes.length}</span>
+    </div>
+    <div class="outliner-list">
+      ${visibleNodes.map((node) => renderOutlinerRow(node, allIslands.filter((island) => island.nodeId === node.id))).join("")}
+    </div>
+  `;
+  nodeList.append(outliner);
+}
 
-    const actions = isMesh
+function renderEditorTools(): HTMLElement {
+  const editorTools = document.createElement("div");
+  editorTools.className = "editor-tool-strip";
+  const canSaveGltf = currentAsset?.kind === "gltf";
+  const canOverrideGlb = currentAsset?.kind === "glb" && currentAsset.accessMode === "handle";
+  editorTools.innerHTML = `
+    <div class="tool-group" aria-label="File actions">
+      <button class="save-gltf-button" type="button" data-export-glb>Export GLB</button>
+      <button
+        class="save-gltf-button"
+        type="button"
+        data-override-glb
+        ${canOverrideGlb ? "" : "disabled"}
+        title="${
+          canOverrideGlb
+            ? "Overwrite the original .glb with the current visible preview"
+            : "Open an editable .glb file to overwrite it directly"
+        }"
+      >Override GLB</button>
+      <button
+        class="save-gltf-button"
+        type="button"
+        data-save-gltf
+        ${canSaveGltf ? "" : "disabled"}
+        title="${canSaveGltf ? "Overwrite the current .gltf with the current visible preview" : "Open an editable .gltf file to overwrite it directly"}"
+      >Override glTF</button>
+      <button type="button" data-history-action="undo">Undo</button>
+      <button type="button" data-history-action="redo">Redo</button>
+    </div>
+    <div class="tool-group" aria-label="Editor modes">
+      ${["select", "move", "rotate", "scale", "material"]
+        .map(
+          (mode) => `
+            <button type="button" data-editor-mode="${mode}" aria-pressed="${editorMode === mode}">${modeLabel(mode)}</button>
+          `
+        )
+        .join("")}
+    </div>
+    <div class="tool-group add-shape-strip" aria-label="Add shapes">
+      <button type="button" data-add-primitive="cube">Cube</button>
+      <button type="button" data-add-primitive="sphere">Sphere</button>
+      <button type="button" data-add-primitive="plane">Plane</button>
+      <button type="button" data-add-primitive="light">Light</button>
+    </div>
+  `;
+  return editorTools;
+}
+
+function renderOutlinerRow(node: NodeInspectorInfo, islands: GeometrySelectionInfo[]): string {
+  const selected = selectedNodeId === node.id && currentGeometrySelection?.nodeId !== node.id;
+  const focused = currentGeometrySelection?.nodeId === node.id;
+  const open = selected || focused;
+  const visible = effectiveNodeVisible(node.id);
+  const indent = Math.min(node.depth, 8) * 10;
+
+  return `
+    <div class="outliner-item ${open ? "is-open" : ""}">
+      <button
+        class="outliner-row ${selected ? "is-selected" : ""} ${focused ? "is-focused" : ""} ${visible ? "" : "is-hidden"}"
+        type="button"
+        data-outliner-node="${node.id}"
+        style="--node-indent: ${indent}px"
+        aria-pressed="${open}"
+      >
+        <span class="outliner-name">${escapeHtml(node.name)}</span>
+        <span class="outliner-badges">${nodeBadges(node, islands, visible)}</span>
+      </button>
+      ${open ? `<div class="outliner-inline-properties">${renderNodeProperties(node, islands)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderNodeProperties(node: NodeInspectorInfo, geometryIslands: GeometrySelectionInfo[]): string {
+  const tags = node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  const transform = node.transform.map((value) => `<li>${escapeHtml(value)}</li>`).join("");
+  const isMesh = node.tags.includes("mesh");
+  const isVisible = effectiveNodeVisible(node.id);
+  const isDeleted = effectiveNodeDeleted(node.id);
+  const isFocusedNode = currentGeometrySelection?.nodeId === node.id;
+  const actions = renderNodeSubsection(
+    node.id,
+    "actions",
+    "Actions",
+    `
+      <div class="node-actions">
+        <button type="button" data-node-action="visible" data-node-id="${node.id}" aria-pressed="${isVisible}">${
+          isVisible ? "Hide" : "Show"
+        }</button>
+        <button
+          type="button"
+          data-node-action="highlight"
+          data-node-id="${node.id}"
+          aria-pressed="${highlightedNodeIds.has(node.id)}"
+          ${isMesh ? "" : "disabled"}
+        >${highlightedNodeIds.has(node.id) ? "Unhighlight" : "Highlight"}</button>
+        <button type="button" data-node-action="isolate" data-node-id="${node.id}" ${isMesh ? "" : "disabled"}>${
+          isNodeIsolated(node.id) ? "Unisolate mesh" : "Isolate mesh"
+        }</button>
+        <button type="button" data-node-action="delete" data-node-id="${node.id}" aria-pressed="${isDeleted}">${
+          isDeleted ? "Restore node" : "Delete"
+        }</button>
+        <button type="button" data-node-action="restore" data-node-id="${node.id}">Restore all</button>
+      </div>
+    `,
+    true
+  );
+  const geometryIslandList = isMesh
+    ? renderNodeSubsection(
+        node.id,
+        "islands",
+        `Geometry islands (${geometryIslands.length})`,
+        geometryIslands.length > 0
+          ? `<div class="island-list">${geometryIslands.map((selection) => renderIslandRow(selection)).join("")}</div>`
+          : `<div class="empty-state compact">No triangle islands found for this mesh.</div>`,
+        isFocusedNode
+      )
+    : "";
+  const materials =
+    node.materials.length > 0
       ? renderNodeSubsection(
           node.id,
-          "actions",
-          "Actions",
+          "materials",
+          `Materials (${node.materials.length})`,
           `
-            <div class="node-actions">
-              <button type="button" data-node-action="visible" data-node-id="${node.id}" aria-pressed="${isVisible}">${
-                isVisible ? "Hide" : "Show"
-              }</button>
-              <button type="button" data-node-action="highlight" data-node-id="${node.id}" aria-pressed="${highlightedNodeIds.has(node.id)}">${
-                highlightedNodeIds.has(node.id) ? "Unhighlight" : "Highlight"
-              }</button>
-              <button type="button" data-node-action="isolate" data-node-id="${node.id}">Isolate mesh</button>
-              <button type="button" data-node-action="restore" data-node-id="${node.id}">Restore all</button>
+            <div class="node-materials">
+              ${node.materials
+                .map(
+                  (material) => `
+                    <div class="material-row">
+                      <span class="material-swatch" style="--swatch: ${material.color ?? "#6e7a72"}"></span>
+                      <div>
+                        <strong>${escapeHtml(material.name)}</strong>
+                        <span>${materialLabel(material)}</span>
+                        ${
+                          material.color
+                            ? `
+                              <label class="material-color-edit">
+                                <span>Color</span>
+                                <input
+                                  type="color"
+                                  value="${material.color}"
+                                  data-node-action="color"
+                                  data-node-id="${node.id}"
+                                  data-material-index="${material.index}"
+                                />
+                                <span class="material-hex">${material.color}</span>
+                              </label>
+                            `
+                            : ""
+                        }
+                      </div>
+                    </div>
+                  `
+                )
+                .join("")}
             </div>
           `,
-          true
+          isFocusedNode || node.materials.length < 3
         )
       : "";
-    const geometryIslandList = isMesh
-      ? renderNodeSubsection(
-          node.id,
-          "islands",
-          `Geometry islands (${geometryIslands.length})`,
-          geometryIslands.length > 0
-            ? `<div class="island-list">${geometryIslands.map((selection) => renderIslandRow(selection)).join("")}</div>`
-            : `<div class="empty-state compact">No triangle islands found for this mesh.</div>`,
-          isFocusedNode
-        )
-      : "";
-    const materials =
-      node.materials.length > 0
-        ? renderNodeSubsection(
-            node.id,
-            "materials",
-            `Materials (${node.materials.length})`,
-            `
-              <div class="node-materials">
-                ${node.materials
-                  .map(
-                    (material) => `
-                      <div class="material-row">
-                        <span class="material-swatch" style="--swatch: ${material.color ?? "#6e7a72"}"></span>
-                        <div>
-                          <strong>${escapeHtml(material.name)}</strong>
-                          <span>${materialLabel(material)}</span>
-                          ${
-                            material.color
-                              ? `
-                                <label class="material-color-edit">
-                                  <span>Color</span>
-                                  <input
-                                    type="color"
-                                    value="${material.color}"
-                                    data-node-action="color"
-                                    data-node-id="${node.id}"
-                                    data-material-index="${material.index}"
-                                  />
-                                  <span class="material-hex">${material.color}</span>
-                                </label>
-                              `
-                              : ""
-                          }
-                        </div>
-                      </div>
-                    `
-                  )
-                  .join("")}
-              </div>
-            `,
-            isFocusedNode || node.materials.length < 3
-          )
-        : "";
-    const geometry = renderNodeSubsection(
-      node.id,
-      node.geometry ? "geometry" : "node",
-      node.geometry ? "Geometry" : "Node",
-      node.geometry
-        ? `
-          <div class="node-detail-row"><span>Geometry</span><strong>${escapeHtml(node.geometry.name)}</strong></div>
-          <div class="node-detail-row"><span>Visible</span><strong>${isVisible ? "yes" : "no"}</strong></div>
-          <div class="node-detail-row"><span>Children</span><strong>${node.childCount}</strong></div>
-          <div class="node-detail-row"><span>Vertices</span><strong>${node.geometry.vertices.toLocaleString()}</strong></div>
-          <div class="node-detail-row"><span>Attributes</span><strong>${escapeHtml(node.geometry.attributes.join(", "))}</strong></div>
-        `
-        : `
-          <div class="node-detail-row"><span>Visible</span><strong>${isVisible ? "yes" : "no"}</strong></div>
-          <div class="node-detail-row"><span>Children</span><strong>${node.childCount}</strong></div>
-        `,
-      false
-    );
-    const transformBlock = transform
-      ? renderNodeSubsection(node.id, "transform", "Transform", `<ul class="node-transform">${transform}</ul>`, false)
-      : "";
-    const tagsBlock = tags
-      ? renderNodeSubsection(node.id, "tags", "Tags", `<div class="node-tags">${tags}</div>`, false)
-      : "";
+  const geometry = renderNodeSubsection(
+    node.id,
+    node.geometry ? "geometry" : "node",
+    node.geometry ? "Geometry" : "Node",
+    node.geometry
+      ? `
+        <div class="node-detail-row"><span>Geometry</span><strong>${escapeHtml(node.geometry.name)}</strong></div>
+        <div class="node-detail-row"><span>Visible</span><strong>${isVisible ? "yes" : "no"}</strong></div>
+        <div class="node-detail-row"><span>Children</span><strong>${node.childCount}</strong></div>
+        <div class="node-detail-row"><span>Vertices</span><strong>${node.geometry.vertices.toLocaleString()}</strong></div>
+        <div class="node-detail-row"><span>Attributes</span><strong>${escapeHtml(node.geometry.attributes.join(", "))}</strong></div>
+      `
+      : `
+        <div class="node-detail-row"><span>Visible</span><strong>${isVisible ? "yes" : "no"}</strong></div>
+        <div class="node-detail-row"><span>Children</span><strong>${node.childCount}</strong></div>
+      `,
+    false
+  );
+  const transformBlock = transform
+    ? renderNodeSubsection(node.id, "transform", "Transform", `<ul class="node-transform">${transform}</ul>`, false)
+    : "";
+  const tagsBlock = tags
+    ? renderNodeSubsection(node.id, "tags", "Tags", `<div class="node-tags">${tags}</div>`, false)
+    : "";
 
-    item.innerHTML = `
-      <summary style="--node-indent: ${Math.min(node.depth, 8) * 10}px">
-        <span class="node-title">${escapeHtml(node.name)}</span>
-        <span class="node-type">${nodeBadges(node, geometryIslands, isVisible)}</span>
-      </summary>
-      <div class="node-details">
-        ${actions}
-        ${geometryIslandList}
-        ${materials}
-        ${geometry}
-        ${transformBlock}
-        ${tagsBlock}
-      </div>
-    `;
-
-    nodeList.append(item);
-  }
+  return `
+    <div class="property-sections">
+      ${actions}
+      ${geometryIslandList}
+      ${materials}
+      ${geometry}
+      ${transformBlock}
+      ${tagsBlock}
+    </div>
+  `;
 }
 
 function renderIslandRow(selection: GeometrySelectionInfo): string {
@@ -897,13 +1126,15 @@ function renderIslandRow(selection: GeometrySelectionInfo): string {
         }${selected ? " · selected" : ""}</span>
       </div>
       <div class="island-actions">
-        <button type="button" data-island-action="visible" data-selection-id="${selection.id}" aria-pressed="${!selection.hidden}">${
-          selection.hidden ? "Show" : "Hide"
+        <button type="button" data-island-action="delete" data-selection-id="${selection.id}" aria-pressed="${selection.hidden}">${
+          selection.hidden ? "Restore" : "Delete"
         }</button>
         <button type="button" data-island-action="highlight" data-selection-id="${selection.id}" aria-pressed="${selected}">${
           selected ? "Unhighlight" : "Highlight"
         }</button>
-        <button type="button" data-island-action="isolate" data-selection-id="${selection.id}">Isolate</button>
+        <button type="button" data-island-action="isolate" data-selection-id="${selection.id}">${
+          isIslandIsolated(selection.id) ? "Unisolate" : "Isolate"
+        }</button>
         <button type="button" data-island-action="hide-siblings" data-selection-id="${selection.id}">Hide siblings</button>
       </div>
     </div>
@@ -953,7 +1184,7 @@ function renderGeometrySelection(): void {
       <span>Island ${currentGeometrySelection.islandIndex} of ${currentGeometrySelection.islandCount}</span>
     </div>
     <div class="selection-actions">
-      <button type="button" data-selection-action="toggle-visibility">${currentGeometrySelection.hidden ? "Show" : "Hide"}</button>
+      <button type="button" data-selection-action="delete">${currentGeometrySelection.hidden ? "Restore" : "Delete"}</button>
       <button type="button" data-selection-action="isolate">Isolate</button>
       <button type="button" data-selection-action="hide-siblings">Hide siblings</button>
       <button type="button" data-selection-action="restore">Restore all</button>
@@ -992,6 +1223,7 @@ function filteredNodes(nodes: NodeInspectorInfo[], islands: GeometrySelectionInf
 function nodeBadges(node: NodeInspectorInfo, islands: GeometrySelectionInfo[], visible: boolean): string {
   const badges = [
     node.type,
+    node.deleted ? "deleted" : "",
     !visible ? "hidden" : "",
     highlightedNodeIds.has(node.id) ? "outlined" : "",
     currentGeometrySelection?.nodeId === node.id ? "focused" : "",
@@ -1009,6 +1241,154 @@ function filterLabel(filter: string): string {
   return "All";
 }
 
+function modeLabel(mode: string): string {
+  if (mode === "move") return "Move";
+  if (mode === "rotate") return "Rotate";
+  if (mode === "scale") return "Scale";
+  if (mode === "material") return "Material";
+  return "Select";
+}
+
+function primitiveLabel(kind: PrimitiveKind): string {
+  if (kind === "sphere") return "Sphere";
+  if (kind === "plane") return "Plane";
+  if (kind === "light") return "Light";
+  return "Cube";
+}
+
+function selectNode(nodeId: number): void {
+  selectedNodeId = nodeId;
+  viewer.selectNode(nodeId);
+  openDetailState.set(nodeKey(nodeId), true);
+  if (currentGeometrySelection) {
+    viewer.clearGeometrySelection();
+  } else {
+    renderNodes(loadedNodes);
+  }
+  setStatus({ label: "Node selected", tone: "idle" });
+}
+
+function refreshSceneFromViewer(): void {
+  loadedNodes = viewer.getNodes();
+  selectedNodeId = viewer.getSelectedNodeId() ?? selectedNodeId;
+  nodeVisibilityOverrides.clear();
+  deletedNodeOverrides.clear();
+  renderNodes(loadedNodes);
+}
+
+async function saveGltfEdits(): Promise<void> {
+  if (!currentAsset) {
+    setStatus({ label: "No model to save", tone: "warn" });
+    return;
+  }
+
+  if (currentAsset.kind !== "gltf") {
+    setStatus({ label: "Save needs .gltf", detail: "GLB export is not wired yet", tone: "warn" });
+    return;
+  }
+
+  if (currentAsset.accessMode !== "handle") {
+    const message = "This model was imported without a writable file handle. Reopen it with Open editable folder or Open files, then save again.";
+    window.alert(message);
+    setStatus({ label: "Save needs editable access", detail: "reopen with an editable picker", tone: "warn" });
+    return;
+  }
+
+  try {
+    const gltfText = await viewer.exportCurrentGltfText();
+    currentAsset = await library.writeAssetText(currentAsset, gltfText);
+    selectedAssetId = currentAsset.id;
+    renderAssets();
+    setStatus({ label: "glTF overridden", detail: currentAsset.name, tone: "ok" });
+  } catch (error) {
+    setStatus({
+      label: "Save failed",
+      detail: error instanceof Error ? error.message : "Unknown error",
+      tone: "error"
+    });
+  }
+}
+
+async function exportCurrentPreviewGlb(): Promise<void> {
+  try {
+    const glb = await viewer.exportCurrentGlb();
+    const baseName = (currentAsset?.name ?? "scene").replace(/\.(gltf|glb)$/i, "");
+    await saveBlobToFile(`${baseName}-preview.glb`, new Blob([glb], { type: "model/gltf-binary" }));
+    setStatus({ label: "GLB exported", detail: `${baseName}-preview.glb`, tone: "ok" });
+  } catch (error) {
+    setStatus({
+      label: "Export failed",
+      detail: error instanceof Error ? error.message : "Unknown error",
+      tone: "error"
+    });
+  }
+}
+
+async function overrideCurrentGlb(): Promise<void> {
+  if (!currentAsset) {
+    setStatus({ label: "No model to overwrite", tone: "warn" });
+    return;
+  }
+
+  if (currentAsset.kind !== "glb") {
+    setStatus({ label: "Override needs .glb", detail: "use Export GLB for a new file", tone: "warn" });
+    return;
+  }
+
+  if (currentAsset.accessMode !== "handle") {
+    const message = "This GLB was not opened with an editable file handle. Reopen it with Open editable folder or Open files, then try Override GLB again.";
+    window.alert(message);
+    setStatus({ label: "Override needs editable access", detail: "reopen with an editable picker", tone: "warn" });
+    return;
+  }
+
+  try {
+    const glb = await viewer.exportCurrentGlb();
+    currentAsset = await library.writeAssetBlob(currentAsset, new Blob([glb], { type: "model/gltf-binary" }));
+    selectedAssetId = currentAsset.id;
+    renderAssets();
+    setStatus({ label: "GLB overridden", detail: currentAsset.name, tone: "ok" });
+  } catch (error) {
+    setStatus({
+      label: "Override failed",
+      detail: error instanceof Error ? error.message : "Unknown error",
+      tone: "error"
+    });
+  }
+}
+
+async function saveBlobToFile(filename: string, blob: Blob): Promise<void> {
+  const savePicker = (window as SaveFileWindow).showSaveFilePicker;
+  if (savePicker) {
+    const handle = await savePicker({
+      suggestedName: filename,
+      types: [
+        {
+          description: "GLB model",
+          accept: {
+            "model/gltf-binary": [".glb"],
+            "application/octet-stream": [".glb"]
+          }
+        }
+      ]
+    });
+    const writable = await handle.createWritable?.();
+    if (!writable) {
+      throw new Error("This browser did not provide a writable file stream for the export.");
+    }
+    await writable.write(blob);
+    await writable.close();
+    return;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function selectionBreadcrumb(selection: GeometrySelectionInfo): string {
   return `${selection.nodeName} / ${selection.materialName} / Island ${selection.islandIndex}`;
 }
@@ -1018,13 +1398,42 @@ function effectiveNodeVisible(nodeId: number): boolean {
   return nodeVisibilityOverrides.get(nodeId) ?? node?.visible ?? true;
 }
 
+function effectiveNodeDeleted(nodeId: number): boolean {
+  const node = loadedNodes.find((item) => item.id === nodeId);
+  return deletedNodeOverrides.get(nodeId) ?? node?.deleted ?? false;
+}
+
 function setNodeVisible(nodeId: number, visible: boolean): boolean {
   if (!viewer.setNodeVisible(nodeId, visible)) return false;
   nodeVisibilityOverrides.set(nodeId, visible);
+  deletedNodeOverrides.set(nodeId, false);
+  const node = loadedNodes.find((item) => item.id === nodeId);
+  if (node) {
+    node.visible = visible;
+    node.deleted = false;
+  }
+  return true;
+}
+
+function setNodeDeleted(nodeId: number, deleted: boolean): boolean {
+  if (!viewer.setNodeDeleted(nodeId, deleted)) return false;
+  nodeVisibilityOverrides.set(nodeId, !deleted);
+  deletedNodeOverrides.set(nodeId, deleted);
+  const node = loadedNodes.find((item) => item.id === nodeId);
+  if (node) {
+    node.visible = !deleted;
+    node.deleted = deleted;
+  }
   return true;
 }
 
 function isolateNode(nodeId: number): void {
+  if (isNodeIsolated(nodeId)) {
+    restoreAllVisibility();
+    setStatus({ label: "Mesh unisolated", tone: "idle" });
+    return;
+  }
+
   for (const node of loadedNodes.filter((item) => item.tags.includes("mesh"))) {
     setNodeVisible(node.id, node.id === nodeId);
   }
@@ -1037,17 +1446,43 @@ function isolateIsland(selectionId: string): void {
   const selection = viewer.getGeometryIslands().find((item) => item.id === selectionId);
   if (!selection) return;
 
+  if (isIslandIsolated(selectionId)) {
+    restoreAllVisibility();
+    setStatus({ label: "Island unisolated", detail: selection.materialName, tone: "idle" });
+    return;
+  }
+
   for (const node of loadedNodes.filter((item) => item.tags.includes("mesh"))) {
     setNodeVisible(node.id, node.id === selection.nodeId);
   }
   for (const island of viewer.getGeometryIslands().filter((item) => item.nodeId === selection.nodeId)) {
     viewer.setGeometrySelectionHidden(island.id, island.id !== selection.id);
   }
-  viewer.highlightGeometrySelection(selection.id);
+  if (currentGeometrySelection?.nodeId === selection.nodeId && currentGeometrySelection.id !== selection.id) {
+    viewer.clearGeometrySelection();
+  }
   revealGeometrySelection(selection);
   renderNodes(loadedNodes);
-  scrollGeometrySelectionIntoView(selection.id);
   setStatus({ label: "Island isolated", detail: selection.materialName, tone: "idle" });
+}
+
+function isNodeIsolated(nodeId: number): boolean {
+  const meshNodes = loadedNodes.filter((item) => item.tags.includes("mesh"));
+  return meshNodes.length > 1 && meshNodes.every((node) => effectiveNodeVisible(node.id) === (node.id === nodeId));
+}
+
+function isIslandIsolated(selectionId: string): boolean {
+  const selection = viewer.getGeometryIslands().find((item) => item.id === selectionId);
+  if (!selection) return false;
+
+  const meshNodes = loadedNodes.filter((item) => item.tags.includes("mesh"));
+  const meshVisibilityMatches = meshNodes.every((node) => effectiveNodeVisible(node.id) === (node.id === selection.nodeId));
+  const siblingVisibilityMatches = viewer
+    .getGeometryIslands()
+    .filter((item) => item.nodeId === selection.nodeId)
+    .every((island) => island.hidden === (island.id !== selectionId));
+
+  return meshVisibilityMatches && siblingVisibilityMatches;
 }
 
 function hideSiblingIslands(selectionId: string): void {
@@ -1058,15 +1493,17 @@ function hideSiblingIslands(selectionId: string): void {
   for (const island of viewer.getGeometryIslands().filter((item) => item.nodeId === selection.nodeId && item.id !== selection.id)) {
     viewer.setGeometrySelectionHidden(island.id, true);
   }
-  viewer.highlightGeometrySelection(selection.id);
+  if (currentGeometrySelection?.nodeId === selection.nodeId && currentGeometrySelection.id !== selection.id) {
+    viewer.clearGeometrySelection();
+  }
   revealGeometrySelection(selection);
   renderNodes(loadedNodes);
-  scrollGeometrySelectionIntoView(selection.id);
   setStatus({ label: "Sibling islands hidden", detail: selection.materialName, tone: "idle" });
 }
 
 function restoreAllVisibility(): void {
-  for (const node of loadedNodes.filter((item) => item.tags.includes("mesh"))) {
+  for (const node of loadedNodes) {
+    setNodeDeleted(node.id, false);
     setNodeVisible(node.id, true);
   }
   for (const island of viewer.getGeometryIslands()) {

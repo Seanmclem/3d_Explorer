@@ -5,6 +5,7 @@ import {
   AnimationMixer,
   Box3,
   Box3Helper,
+  BoxGeometry,
   BufferAttribute,
   BufferGeometry,
   Clock,
@@ -19,13 +20,18 @@ import {
   Material,
   Mesh,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   MOUSE,
   Object3D,
   PCFSoftShadowMap,
   PerspectiveCamera,
+  PlaneGeometry,
+  PointLight,
+  Quaternion,
   Raycaster,
   Scene,
   SkinnedMesh,
+  SphereGeometry,
   SRGBColorSpace,
   TOUCH,
   Texture,
@@ -34,8 +40,10 @@ import {
   WebGLRenderer
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import type { GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
+import type { GLTF, GLTFReference } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type {
   GeometrySelectionInfo,
   LoadedModel,
@@ -51,7 +59,11 @@ export type ViewerOptions = {
   canvas: HTMLCanvasElement;
   onPlayback?: (state: PlaybackState) => void;
   onGeometrySelection?: (selection: GeometrySelectionInfo | null) => void;
+  onSceneEdited?: () => void;
 };
+
+export type EditorMode = "select" | "move" | "rotate" | "scale" | "material";
+export type PrimitiveKind = "cube" | "sphere" | "plane" | "light";
 
 type PointerStart = {
   x: number;
@@ -95,7 +107,79 @@ type GeometryIslandRecord = {
   triangleOffsets: number[];
 };
 
+type TransformSnapshot = {
+  position: Vector3;
+  quaternion: Quaternion;
+  scale: Vector3;
+};
+
+type EditorCommand =
+  | {
+      kind: "transform";
+      object: Object3D;
+      before: TransformSnapshot;
+      after: TransformSnapshot;
+    }
+  | {
+      kind: "add";
+      object: Object3D;
+      parent: Object3D;
+    };
+
+type GltfJson = {
+  scene?: number;
+  scenes?: Array<{
+    nodes?: number[];
+    extras?: Record<string, unknown>;
+  }>;
+  nodes?: Array<
+    Record<string, unknown> & {
+      children?: number[];
+      mesh?: number;
+    }
+  >;
+  meshes?: Array<{
+    primitives?: Array<Record<string, unknown>>;
+  }>;
+  materials?: Array<Record<string, unknown>>;
+};
+
+type ViewerNodeExtras = {
+  id?: string;
+  hidden?: boolean;
+  hiddenPrimitives?: number[];
+  hiddenIslands?: Array<{
+    materialIndex: number;
+    islandIndex: number;
+  }>;
+};
+
+type ViewerSceneExtras = {
+  hiddenObjectIds?: string[];
+  deletedObjectIds?: string[];
+};
+
+type GltfMaterialJson = {
+  pbrMetallicRoughness?: {
+    baseColorFactor?: number[];
+  };
+};
+
+type GltfObjectReference = GLTFReference & {
+  primitives?: number;
+};
+
+export type GltfSaveResult = {
+  text: string;
+  hiddenNodes: number;
+  deletedNodes: number;
+  hiddenIslands: number;
+  materialColors: number;
+  skippedHiddenNodes: number;
+};
+
 const DEFAULT_CAMERA_POSITION = new Vector3(4.5, 3, 6);
+const VIEWER_EXTRAS_KEY = "gltfExplorer";
 
 export class GltfViewer {
   readonly scene = new Scene();
@@ -107,18 +191,25 @@ export class GltfViewer {
   private readonly modelGroup = new Group();
   private readonly grid = new GridHelper(10, 20, 0x94a39a, 0x27302b);
   private readonly boundsHelper = new Box3Helper(new Box3(), 0x19c37d);
+  private readonly transformControls: TransformControls;
   private readonly onPlayback?: (state: PlaybackState) => void;
   private readonly onGeometrySelection?: (selection: GeometrySelectionInfo | null) => void;
+  private readonly onSceneEdited?: () => void;
   private readonly resizeObserver: ResizeObserver;
   private readonly inspectedNodes = new Map<number, Object3D>();
   private readonly nodeIdsByMesh = new WeakMap<Mesh, number>();
   private readonly highlightHelpers = new Map<number, Object3D>();
   private readonly geometryIslands = new Map<string, GeometryIslandRecord>();
   private readonly meshGroupStates = new Map<Mesh, MeshGroupState>();
+  private readonly gltfNodeIndicesByNodeId = new Map<number, number>();
+  private readonly gltfPrimitiveRefsByNodeId = new Map<number, { nodeIndex: number; primitiveIndex: number }>();
+  private readonly objectPersistentIdsByNodeId = new Map<number, string>();
+  private readonly exactGltfNodeIndicesByObject = new Map<Object3D, number>();
   private readonly raycaster = new Raycaster();
   private readonly pointerNdc = new Vector2();
   private pointerStart?: PointerStart;
   private islandHighlight?: Object3D;
+  private islandHighlightMesh?: Mesh;
   private currentGeometrySelectionId?: string;
   private animationFrame = 0;
   private mixer?: AnimationMixer;
@@ -126,6 +217,15 @@ export class GltfViewer {
   private activeAction?: AnimationAction;
   private activeClipIndex = -1;
   private playbackSpeed = 1;
+  private editorMode: EditorMode = "select";
+  private selectedObject?: Object3D;
+  private transformStart?: TransformSnapshot;
+  private indexingHiddenStates?: Map<string, boolean>;
+  private gltfJson?: GltfJson;
+  private gltfAssociations?: Map<Object3D | Material | Texture, GLTFReference>;
+  private readonly undoStack: EditorCommand[] = [];
+  private readonly redoStack: EditorCommand[] = [];
+  private primitiveCounter = 0;
   private paused = true;
   private wireframe = false;
   private boundsVisible = true;
@@ -134,6 +234,7 @@ export class GltfViewer {
   constructor(options: ViewerOptions) {
     this.onPlayback = options.onPlayback;
     this.onGeometrySelection = options.onGeometrySelection;
+    this.onSceneEdited = options.onSceneEdited;
     this.scene.background = new Color(0x101210);
     this.camera = new PerspectiveCamera(45, 1, 0.01, 2000);
     this.camera.position.copy(DEFAULT_CAMERA_POSITION);
@@ -154,6 +255,19 @@ export class GltfViewer {
     this.controls.screenSpacePanning = true;
     this.controls.target.set(0, 0.7, 0);
     this.controls.update();
+
+    this.transformControls = new TransformControls(this.camera, this.renderer.domElement);
+    this.transformControls.visible = false;
+    this.transformControls.addEventListener("dragging-changed", (event) => {
+      this.controls.enabled = !(event as { value?: boolean }).value;
+    });
+    this.transformControls.addEventListener("mouseDown", () => {
+      this.transformStart = this.selectedObject ? this.captureTransform(this.selectedObject) : undefined;
+    });
+    this.transformControls.addEventListener("mouseUp", () => {
+      this.commitTransformChange();
+    });
+    this.scene.add(this.transformControls);
 
     this.modelGroup.name = "Loaded model";
     this.scene.add(this.modelGroup);
@@ -196,9 +310,14 @@ export class GltfViewer {
     const loader = new GLTFLoader(manager);
 
     const payload = asset.kind === "gltf" ? await asset.file.text() : await asset.file.arrayBuffer();
+    if (asset.kind === "gltf") {
+      this.gltfJson = JSON.parse(payload as string) as GltfJson;
+    }
+
     const gltf = await new Promise<GLTF>((resolve, reject) => {
       loader.parse(payload, asset.basePath, resolve, reject);
     });
+    this.gltfAssociations = gltf.parser.associations;
 
     const root = gltf.scene || gltf.scenes[0];
     if (!root) {
@@ -214,6 +333,7 @@ export class GltfViewer {
     });
 
     this.modelGroup.add(root);
+    this.indexExactGltfNodeMappings(root);
     this.clips = gltf.animations;
     this.mixer = this.clips.length > 0 ? new AnimationMixer(root) : undefined;
     this.activeClipIndex = -1;
@@ -262,13 +382,116 @@ export class GltfViewer {
     this.renderer.domElement.dataset.mode = enabled ? "pan" : "orbit";
   }
 
+  setEditorMode(mode: EditorMode): void {
+    this.editorMode = mode;
+    if (mode === "move") {
+      this.transformControls.setMode("translate");
+    } else if (mode === "rotate") {
+      this.transformControls.setMode("rotate");
+    } else if (mode === "scale") {
+      this.transformControls.setMode("scale");
+    }
+
+    this.syncTransformControls();
+  }
+
+  selectNode(nodeId: number | null): boolean {
+    const node = nodeId == null ? undefined : this.inspectedNodes.get(nodeId);
+    if (nodeId != null && !node) return false;
+
+    this.selectedObject = node;
+    this.syncTransformControls();
+    return true;
+  }
+
+  getSelectedNodeId(): number | undefined {
+    if (!this.selectedObject) return undefined;
+    for (const [nodeId, node] of this.inspectedNodes.entries()) {
+      if (node === this.selectedObject) return nodeId;
+    }
+    return undefined;
+  }
+
+  getNodes(): NodeInspectorInfo[] {
+    const root = this.modelGroup.children[0];
+    if (!root) return [];
+    return this.describeNodes(root, this.clips);
+  }
+
+  addPrimitive(kind: PrimitiveKind): NodeInspectorInfo[] {
+    const parent = this.ensureEditableRoot();
+    const object = this.createPrimitive(kind);
+    object.position.copy(this.controls.target);
+    parent.add(object);
+    this.selectedObject = object;
+    this.undoStack.push({ kind: "add", object, parent });
+    this.redoStack.length = 0;
+    this.syncTransformControls();
+    this.onSceneEdited?.();
+    return this.getNodes();
+  }
+
+  undo(): boolean {
+    const command = this.undoStack.pop();
+    if (!command) return false;
+
+    if (command.kind === "transform") {
+      this.applyTransform(command.object, command.before);
+    } else if (command.kind === "add") {
+      command.object.removeFromParent();
+      if (this.selectedObject === command.object) {
+        this.selectedObject = undefined;
+      }
+      this.syncTransformControls();
+    }
+
+    this.redoStack.push(command);
+    this.onSceneEdited?.();
+    return true;
+  }
+
+  redo(): boolean {
+    const command = this.redoStack.pop();
+    if (!command) return false;
+
+    if (command.kind === "transform") {
+      this.applyTransform(command.object, command.after);
+    } else if (command.kind === "add") {
+      command.parent.add(command.object);
+      this.selectedObject = command.object;
+      this.syncTransformControls();
+    }
+
+    this.undoStack.push(command);
+    this.onSceneEdited?.();
+    return true;
+  }
+
   setNodeVisible(nodeId: number, visible: boolean): boolean {
     const node = this.inspectedNodes.get(nodeId);
     if (!node) return false;
 
+    node.userData.__viewerDeleted = false;
     node.visible = visible;
     const highlight = this.highlightHelpers.get(nodeId);
     if (highlight) highlight.visible = visible;
+    return true;
+  }
+
+  setNodeDeleted(nodeId: number, deleted: boolean): boolean {
+    const node = this.inspectedNodes.get(nodeId);
+    if (!node) return false;
+
+    node.userData.__viewerDeleted = deleted;
+    node.visible = !deleted;
+    const highlight = this.highlightHelpers.get(nodeId);
+    if (highlight) highlight.visible = node.visible;
+    if (deleted && this.currentGeometrySelectionId) {
+      const selection = this.geometryIslands.get(this.currentGeometrySelectionId);
+      if (selection?.info.nodeId === nodeId) {
+        this.clearGeometrySelection();
+      }
+    }
     return true;
   }
 
@@ -410,11 +633,71 @@ export class GltfViewer {
     return this.renderer.domElement.toDataURL("image/png");
   }
 
+  async exportCurrentGlb(): Promise<ArrayBuffer> {
+    const root = this.modelGroup.children[0];
+    if (!root) {
+      throw new Error("No model is loaded.");
+    }
+
+    const exporter = new GLTFExporter();
+    const result = await exporter.parseAsync(root, {
+      binary: true,
+      onlyVisible: true,
+      includeCustomExtensions: true
+    });
+
+    if (!(result instanceof ArrayBuffer)) {
+      throw new Error("The exporter returned JSON instead of a binary GLB.");
+    }
+
+    return result;
+  }
+
+  async exportCurrentGltfText(): Promise<string> {
+    const root = this.modelGroup.children[0];
+    if (!root) {
+      throw new Error("No model is loaded.");
+    }
+
+    const exporter = new GLTFExporter();
+    const result = await exporter.parseAsync(root, {
+      binary: false,
+      onlyVisible: true,
+      includeCustomExtensions: true
+    });
+
+    if (!result || typeof result !== "object" || result instanceof ArrayBuffer) {
+      throw new Error("The exporter returned a binary result instead of glTF JSON.");
+    }
+
+    return `${JSON.stringify(result, null, 2)}\n`;
+  }
+
+  createGltfSaveText(): GltfSaveResult {
+    if (!this.gltfJson) {
+      throw new Error("Only editable .gltf JSON files can be saved right now. GLB export is not wired yet.");
+    }
+
+    const nodeStats = this.syncNodeVisibilityToGltf();
+    const hiddenIslands = this.syncIslandVisibilityToGltf();
+    const materialColors = this.syncMaterialColorsToGltf();
+
+    return {
+      text: `${JSON.stringify(this.gltfJson, null, 2)}\n`,
+      hiddenNodes: nodeStats.hiddenNodes,
+      deletedNodes: nodeStats.deletedNodes,
+      hiddenIslands,
+      materialColors,
+      skippedHiddenNodes: nodeStats.skippedHiddenNodes
+    };
+  }
+
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.animationFrame);
     this.clearModel();
     this.resizeObserver.disconnect();
+    this.transformControls.dispose();
     this.controls.dispose();
     this.renderer.domElement.removeEventListener("webglcontextlost", this.handleContextLost);
     this.renderer.domElement.removeEventListener("webglcontextrestored", this.handleContextRestored);
@@ -434,6 +717,7 @@ export class GltfViewer {
       this.emitPlayback();
     }
 
+    this.updateIslandHighlightTransform();
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.tick);
   };
@@ -448,13 +732,25 @@ export class GltfViewer {
   }
 
   private clearModel(): void {
+    this.transformControls.detach();
+    this.transformControls.visible = false;
     this.mixer?.stopAllAction();
     this.mixer = undefined;
     this.clips = [];
     this.activeAction = undefined;
     this.activeClipIndex = -1;
+    this.selectedObject = undefined;
+    this.transformStart = undefined;
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
     this.inspectedNodes.clear();
     this.geometryIslands.clear();
+    this.gltfNodeIndicesByNodeId.clear();
+    this.gltfPrimitiveRefsByNodeId.clear();
+    this.objectPersistentIdsByNodeId.clear();
+    this.exactGltfNodeIndicesByObject.clear();
+    this.gltfJson = undefined;
+    this.gltfAssociations = undefined;
     for (const state of this.meshGroupStates.values()) {
       state.hiddenMaterial.dispose();
     }
@@ -493,6 +789,106 @@ export class GltfViewer {
     material.dispose();
   }
 
+  private ensureEditableRoot(): Object3D {
+    const existing = this.modelGroup.children[0];
+    if (existing) return existing;
+
+    const root = new Group();
+    root.name = "Editor scene";
+    this.modelGroup.add(root);
+    this.boundsHelper.box.makeEmpty();
+    return root;
+  }
+
+  private createPrimitive(kind: PrimitiveKind): Object3D {
+    this.primitiveCounter += 1;
+
+    if (kind === "light") {
+      const light = new PointLight(0xffffff, 4, 10);
+      light.name = `Light ${this.primitiveCounter}`;
+      light.position.set(this.controls.target.x, this.controls.target.y + 1.5, this.controls.target.z + 1);
+      return light;
+    }
+
+    const material = new MeshStandardMaterial({
+      color: kind === "plane" ? 0x8fb7a2 : kind === "sphere" ? 0x8aa7ff : 0x19c37d,
+      roughness: 0.62,
+      metalness: 0.05
+    });
+    const geometry =
+      kind === "sphere"
+        ? new SphereGeometry(0.5, 32, 16)
+        : kind === "plane"
+          ? new PlaneGeometry(1.5, 1.5)
+          : new BoxGeometry(1, 1, 1);
+    geometry.name = `${this.capitalize(kind)}Geometry`;
+
+    const mesh = new Mesh(geometry, material);
+    mesh.name = `${this.capitalize(kind)} ${this.primitiveCounter}`;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.applyWireframe(mesh, this.wireframe);
+    if (kind === "plane") {
+      mesh.rotation.x = -Math.PI / 2;
+    }
+    return mesh;
+  }
+
+  private syncTransformControls(): void {
+    const transformMode = this.editorMode === "move" || this.editorMode === "rotate" || this.editorMode === "scale";
+    if (transformMode && this.selectedObject) {
+      this.transformControls.attach(this.selectedObject);
+      this.transformControls.visible = true;
+    } else {
+      this.transformControls.detach();
+      this.transformControls.visible = false;
+    }
+  }
+
+  private captureTransform(object: Object3D): TransformSnapshot {
+    return {
+      position: object.position.clone(),
+      quaternion: object.quaternion.clone(),
+      scale: object.scale.clone()
+    };
+  }
+
+  private applyTransform(object: Object3D, transform: TransformSnapshot): void {
+    object.position.copy(transform.position);
+    object.quaternion.copy(transform.quaternion);
+    object.scale.copy(transform.scale);
+    object.updateMatrixWorld(true);
+  }
+
+  private commitTransformChange(): void {
+    if (!this.selectedObject || !this.transformStart) return;
+
+    const after = this.captureTransform(this.selectedObject);
+    if (
+      after.position.distanceTo(this.transformStart.position) < 0.000001 &&
+      Math.abs(after.quaternion.dot(this.transformStart.quaternion)) > 0.999999 &&
+      after.scale.distanceTo(this.transformStart.scale) < 0.000001
+    ) {
+      this.transformStart = undefined;
+      return;
+    }
+
+    this.undoStack.push({
+      kind: "transform",
+      object: this.selectedObject,
+      before: this.transformStart,
+      after
+    });
+    this.redoStack.length = 0;
+    this.transformStart = undefined;
+    this.updateIslandHighlightTransform();
+    this.onSceneEdited?.();
+  }
+
+  private capitalize(value: string): string {
+    return value.charAt(0).toUpperCase() + value.slice(1);
+  }
+
   private applyWireframe(mesh: Mesh, enabled: boolean): void {
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const material of materials) {
@@ -502,7 +898,346 @@ export class GltfViewer {
     }
   }
 
+  private syncNodeVisibilityToGltf(): { hiddenNodes: number; deletedNodes: number; skippedHiddenNodes: number } {
+    let hiddenNodes = 0;
+    let deletedNodes = 0;
+    let skippedHiddenNodes = 0;
+
+    this.clearViewerVisibilityExtras();
+    const hiddenObjectIds: string[] = [];
+    const deletedObjectIds: string[] = [];
+
+    for (const [nodeId, node] of this.inspectedNodes.entries()) {
+      const objectId = this.objectPersistentIdsByNodeId.get(nodeId);
+      if (!objectId) {
+        if (!node.visible || node.userData.__viewerDeleted === true) skippedHiddenNodes += 1;
+        continue;
+      }
+
+      if (node.userData.__viewerDeleted === true) {
+        deletedObjectIds.push(objectId);
+        deletedNodes += 1;
+        continue;
+      }
+
+      if (!node.visible) {
+        hiddenObjectIds.push(objectId);
+        hiddenNodes += 1;
+      }
+    }
+
+    const sceneExtras = this.ensureViewerExtrasForScene();
+    if (hiddenObjectIds.length > 0) {
+      sceneExtras.hiddenObjectIds = hiddenObjectIds;
+    }
+    if (deletedObjectIds.length > 0) {
+      sceneExtras.deletedObjectIds = deletedObjectIds;
+    }
+    this.cleanupViewerSceneExtras();
+    return { hiddenNodes, deletedNodes, skippedHiddenNodes };
+  }
+
+  private syncIslandVisibilityToGltf(): number {
+    const hiddenByNode = new Map<number, ViewerNodeExtras["hiddenIslands"]>();
+    for (const record of this.geometryIslands.values()) {
+      if (!record.info.hidden) continue;
+      const entries = hiddenByNode.get(record.info.nodeId) ?? [];
+      entries.push({
+        materialIndex: record.info.materialIndex,
+        islandIndex: record.info.islandIndex
+      });
+      hiddenByNode.set(record.info.nodeId, entries);
+    }
+
+    let hiddenIslandCount = 0;
+    for (const [nodeId, hiddenIslands] of hiddenByNode.entries()) {
+      const nodeIndex = this.gltfNodeIndicesByNodeId.get(nodeId);
+      if (nodeIndex == null || !hiddenIslands || hiddenIslands.length === 0) continue;
+      this.ensureViewerExtrasForNodeIndex(nodeIndex).hiddenIslands = hiddenIslands;
+      hiddenIslandCount += hiddenIslands.length;
+    }
+
+    return hiddenIslandCount;
+  }
+
+  private clearViewerVisibilityExtras(): void {
+    const nodes = this.gltfJson?.nodes;
+    if (nodes) {
+      for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
+        const extras = this.viewerExtrasForNodeIndex(nodeIndex);
+        if (!extras) continue;
+        delete extras.hidden;
+        delete extras.hiddenPrimitives;
+        delete extras.hiddenIslands;
+        this.cleanupViewerExtras(nodeIndex);
+      }
+    }
+
+    const sceneExtras = this.viewerExtrasForScene();
+    if (sceneExtras) {
+      delete sceneExtras.hiddenObjectIds;
+      delete sceneExtras.deletedObjectIds;
+      this.cleanupViewerSceneExtras();
+    }
+  }
+
+  private syncMaterialColorsToGltf(): number {
+    if (!this.gltfJson?.materials || !this.gltfAssociations) return 0;
+
+    let materialColors = 0;
+    for (const [target, reference] of this.gltfAssociations.entries()) {
+      if (!(target instanceof Material) || typeof reference.materials !== "number") continue;
+
+      const material = target as Material & { color?: Color; opacity?: number };
+      if (!(material.color instanceof Color)) continue;
+
+      const gltfMaterial = this.gltfJson.materials[reference.materials] as GltfMaterialJson | undefined;
+      if (!gltfMaterial) continue;
+
+      const pbr = gltfMaterial.pbrMetallicRoughness ?? {};
+      const previous = Array.isArray(pbr.baseColorFactor) ? pbr.baseColorFactor : [1, 1, 1, 1];
+      pbr.baseColorFactor = [
+        Number(material.color.r.toFixed(6)),
+        Number(material.color.g.toFixed(6)),
+        Number(material.color.b.toFixed(6)),
+        typeof material.opacity === "number" ? Number(material.opacity.toFixed(6)) : (previous[3] ?? 1)
+      ];
+      gltfMaterial.pbrMetallicRoughness = pbr;
+      materialColors += 1;
+    }
+
+    return materialColors;
+  }
+
+  private viewerExtrasForNodeIndex(nodeIndex: number): ViewerNodeExtras | undefined {
+    const node = this.gltfJson?.nodes?.[nodeIndex];
+    const extras = node?.extras as Record<string, unknown> | undefined;
+    const viewerExtras = extras?.[VIEWER_EXTRAS_KEY];
+    return viewerExtras && typeof viewerExtras === "object" ? (viewerExtras as ViewerNodeExtras) : undefined;
+  }
+
+  private viewerExtrasForScene(): ViewerSceneExtras | undefined {
+    const scene = this.gltfJson?.scenes?.[this.gltfJson.scene ?? 0];
+    const extras = scene?.extras;
+    const viewerExtras = extras?.[VIEWER_EXTRAS_KEY];
+    return viewerExtras && typeof viewerExtras === "object" ? (viewerExtras as ViewerSceneExtras) : undefined;
+  }
+
+  private ensureViewerExtrasForScene(): ViewerSceneExtras {
+    const scene = this.gltfJson?.scenes?.[this.gltfJson.scene ?? 0];
+    if (!scene) {
+      throw new Error("The selected scene could not be mapped back to the glTF JSON.");
+    }
+
+    const extras = ((scene.extras as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
+    scene.extras = extras;
+
+    const existing = extras[VIEWER_EXTRAS_KEY];
+    if (existing && typeof existing === "object") {
+      return existing as ViewerSceneExtras;
+    }
+
+    const viewerExtras: ViewerSceneExtras = {};
+    extras[VIEWER_EXTRAS_KEY] = viewerExtras;
+    return viewerExtras;
+  }
+
+  private ensureViewerExtrasForNodeIndex(nodeIndex: number): ViewerNodeExtras {
+    const node = this.gltfJson?.nodes?.[nodeIndex];
+    if (!node) {
+      throw new Error("The selected node could not be mapped back to the glTF JSON.");
+    }
+
+    const extras = ((node.extras as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
+    node.extras = extras;
+
+    const existing = extras[VIEWER_EXTRAS_KEY];
+    if (existing && typeof existing === "object") {
+      return existing as ViewerNodeExtras;
+    }
+
+    const viewerExtras: ViewerNodeExtras = {};
+    extras[VIEWER_EXTRAS_KEY] = viewerExtras;
+    return viewerExtras;
+  }
+
+  private cleanupViewerExtras(nodeIndex: number): void {
+    const node = this.gltfJson?.nodes?.[nodeIndex];
+    const extras = node?.extras as Record<string, unknown> | undefined;
+    const viewerExtras = extras?.[VIEWER_EXTRAS_KEY] as ViewerNodeExtras | undefined;
+    if (!extras || !viewerExtras) return;
+
+    if (
+      !viewerExtras.id &&
+      !viewerExtras.hidden &&
+      (!viewerExtras.hiddenPrimitives || viewerExtras.hiddenPrimitives.length === 0) &&
+      (!viewerExtras.hiddenIslands || viewerExtras.hiddenIslands.length === 0)
+    ) {
+      delete extras[VIEWER_EXTRAS_KEY];
+    }
+    if (Object.keys(extras).length === 0 && node) {
+      delete node.extras;
+    }
+  }
+
+  private cleanupViewerSceneExtras(): void {
+    const scene = this.gltfJson?.scenes?.[this.gltfJson.scene ?? 0];
+    const extras = scene?.extras as Record<string, unknown> | undefined;
+    const viewerExtras = extras?.[VIEWER_EXTRAS_KEY] as ViewerSceneExtras | undefined;
+    if (!extras || !viewerExtras) return;
+
+    if (
+      (!viewerExtras.hiddenObjectIds || viewerExtras.hiddenObjectIds.length === 0) &&
+      (!viewerExtras.deletedObjectIds || viewerExtras.deletedObjectIds.length === 0)
+    ) {
+      delete extras[VIEWER_EXTRAS_KEY];
+    }
+    if (Object.keys(extras).length === 0 && scene) {
+      delete scene.extras;
+    }
+  }
+
+  private ensurePersistentObjectId(node: Object3D, gltfNodeIndex?: number, primitiveIndex?: number): string {
+    if (typeof gltfNodeIndex === "number") {
+      const extras = this.ensureViewerExtrasForNodeIndex(gltfNodeIndex);
+      if (!extras.id) {
+        extras.id = this.createViewerObjectId("node");
+      }
+      return typeof primitiveIndex === "number" ? `${extras.id}:primitive:${primitiveIndex}` : extras.id;
+    }
+
+    const existing = node.userData.__viewerObjectId;
+    if (typeof existing === "string" && existing.length > 0) {
+      return existing;
+    }
+
+    const nextId = this.createViewerObjectId("local");
+    node.userData.__viewerObjectId = nextId;
+    return nextId;
+  }
+
+  private createViewerObjectId(kind: "node" | "primitive" | "local"): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return `gltfexplorer:${kind}:${crypto.randomUUID()}`;
+    }
+
+    return `gltfexplorer:${kind}:${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+
+  private savedIslandHidden(nodeId: number, materialIndex: number, islandIndex: number): boolean {
+    const nodeIndex = this.gltfNodeIndicesByNodeId.get(nodeId);
+    if (nodeIndex == null) return false;
+
+    return Boolean(
+      this.viewerExtrasForNodeIndex(nodeIndex)?.hiddenIslands?.some(
+        (island) => island.materialIndex === materialIndex && island.islandIndex === islandIndex
+      )
+    );
+  }
+
+  private gltfNodeIndexForObject(nodeId: number, node: Object3D): number | undefined {
+    const associated = this.gltfNodeIndicesByNodeId.get(nodeId);
+    if (associated != null) return associated;
+
+    const linked = this.associatedGltfNodeIndex(node);
+    if (linked != null) return linked;
+
+    if (!node.name || !this.gltfJson?.nodes) return undefined;
+
+    const matchingIndices = this.gltfJson.nodes
+      .map((gltfNode, index) => (gltfNode.name === node.name ? index : -1))
+      .filter((index) => index >= 0);
+
+    return matchingIndices.length === 1 ? matchingIndices[0] : undefined;
+  }
+
+  private exactGltfNodeIndexForObject(nodeId: number, node: Object3D): number | undefined {
+    const exact = this.exactGltfNodeIndicesByObject.get(node);
+    if (exact != null) return exact;
+
+    const associated = this.gltfAssociations?.get(node)?.nodes;
+    if (typeof associated === "number") return associated;
+
+    if (!node.name || !this.gltfJson?.nodes) return undefined;
+
+    const matchingIndices = this.gltfJson.nodes
+      .map((gltfNode, index) => (gltfNode.name === node.name ? index : -1))
+      .filter((index) => index >= 0);
+
+    return matchingIndices.length === 1 ? matchingIndices[0] : undefined;
+  }
+
+  private associatedGltfNodeIndex(node: Object3D): number | undefined {
+    let current: Object3D | null = node;
+
+    while (current) {
+      const mapped = this.exactGltfNodeIndicesByObject.get(current);
+      if (mapped != null) {
+        return mapped;
+      }
+      current = current.parent;
+    }
+
+    return undefined;
+  }
+
+  private indexExactGltfNodeMappings(root: Object3D): void {
+    this.exactGltfNodeIndicesByObject.clear();
+
+    const sceneIndex = this.gltfJson?.scene ?? 0;
+    const sceneNodes = this.gltfJson?.scenes?.[sceneIndex]?.nodes ?? [];
+    if (sceneNodes.length === 0) return;
+
+    for (let index = 0; index < sceneNodes.length; index += 1) {
+      const object = root.children[index];
+      const nodeIndex = sceneNodes[index];
+      if (!object || nodeIndex == null) continue;
+      this.mapExactGltfNode(object, nodeIndex);
+    }
+  }
+
+  private mapExactGltfNode(object: Object3D, nodeIndex: number): void {
+    this.exactGltfNodeIndicesByObject.set(object, nodeIndex);
+
+    const childNodeIndices = this.gltfJson?.nodes?.[nodeIndex]?.children ?? [];
+    if (childNodeIndices.length === 0) return;
+
+    const startIndex = object.children.length - childNodeIndices.length;
+    if (startIndex < 0) return;
+
+    for (let index = 0; index < childNodeIndices.length; index += 1) {
+      const childObject = object.children[startIndex + index];
+      const childNodeIndex = childNodeIndices[index];
+      if (!childObject || childNodeIndex == null) continue;
+      this.mapExactGltfNode(childObject, childNodeIndex);
+    }
+  }
+
+  private associatedPrimitiveRef(node: Object3D): { nodeIndex: number; primitiveIndex: number } | undefined {
+    const primitiveIndex = (this.gltfAssociations?.get(node) as GltfObjectReference | undefined)?.primitives;
+    if (typeof primitiveIndex !== "number") return undefined;
+
+    const nodeIndex = this.associatedGltfNodeIndex(node);
+    if (nodeIndex == null) return undefined;
+
+    return { nodeIndex, primitiveIndex };
+  }
+
   private describeNodes(root: Object3D, clips: AnimationClip[]): NodeInspectorInfo[] {
+    const previousVisibility = new Map(
+      Array.from(this.inspectedNodes.values()).map((node) => [node, node.visible])
+    );
+    const savedHiddenObjectIds = new Set(this.viewerExtrasForScene()?.hiddenObjectIds ?? []);
+    const savedDeletedObjectIds = new Set(this.viewerExtrasForScene()?.deletedObjectIds ?? []);
+    this.indexingHiddenStates = new Map(
+      Array.from(this.geometryIslands.values()).map((record) => [record.info.id, record.info.hidden])
+    );
+    this.inspectedNodes.clear();
+    this.geometryIslands.clear();
+    this.gltfNodeIndicesByNodeId.clear();
+    this.gltfPrimitiveRefsByNodeId.clear();
+    this.objectPersistentIdsByNodeId.clear();
     const animationTargets = this.animationTargetNames(clips);
     const depths = new Map<Object3D, number>();
     const nodes: NodeInspectorInfo[] = [];
@@ -515,6 +1250,23 @@ export class GltfViewer {
         depths.set(child, depth + 1);
       }
 
+      const gltfNodeIndex = this.associatedGltfNodeIndex(node);
+      const primitiveRef = this.associatedPrimitiveRef(node);
+      const objectPersistentId = this.ensurePersistentObjectId(node, primitiveRef?.nodeIndex ?? gltfNodeIndex, primitiveRef?.primitiveIndex);
+      const hasImportedIdentity = primitiveRef != null || typeof gltfNodeIndex === "number";
+      const previousVisible = previousVisibility.get(node);
+      if (previousVisible != null) {
+        node.visible = previousVisible;
+      } else if (savedDeletedObjectIds.has(objectPersistentId)) {
+        node.userData.__viewerDeleted = true;
+        node.visible = false;
+      } else if (savedHiddenObjectIds.has(objectPersistentId)) {
+        node.userData.__viewerDeleted = false;
+        node.visible = false;
+      } else {
+        node.userData.__viewerDeleted = false;
+      }
+
       const materials = node instanceof Mesh ? this.describeMaterials(node) : [];
       const transform = this.describeTransform(node);
       const tags = this.describeNodeTags(node, animationTargets, materials);
@@ -522,6 +1274,15 @@ export class GltfViewer {
 
       const nodeId = id++;
       this.inspectedNodes.set(nodeId, node);
+      if (hasImportedIdentity) {
+        this.objectPersistentIdsByNodeId.set(nodeId, objectPersistentId);
+      }
+      if (typeof gltfNodeIndex === "number") {
+        this.gltfNodeIndicesByNodeId.set(nodeId, gltfNodeIndex);
+      }
+      if (primitiveRef) {
+        this.gltfPrimitiveRefsByNodeId.set(nodeId, primitiveRef);
+      }
       if (node instanceof Mesh) {
         this.nodeIdsByMesh.set(node, nodeId);
         this.indexGeometryIslands(node, nodeId);
@@ -532,6 +1293,7 @@ export class GltfViewer {
         depth,
         name: node.name || "(unnamed)",
         type: node.type,
+        deleted: node.userData.__viewerDeleted === true,
         visible: node.visible,
         childCount: node.children.length,
         tags,
@@ -541,6 +1303,7 @@ export class GltfViewer {
       });
     });
 
+    this.indexingHiddenStates = undefined;
     return nodes;
   }
 
@@ -554,6 +1317,7 @@ export class GltfViewer {
     if ("isSkinnedMesh" in node && node.isSkinnedMesh) tags.push("skinned");
     if (animationTargets.has(node.name)) tags.push("animated");
     if (materials.length > 0) tags.push(`${materials.length} material${materials.length === 1 ? "" : "s"}`);
+    if (node.userData.__viewerDeleted === true) tags.push("deleted");
     if (!node.visible) tags.push("hidden");
     if (node.children.length > 0) tags.push(`${node.children.length} child${node.children.length === 1 ? "" : "ren"}`);
     return tags;
@@ -756,8 +1520,12 @@ export class GltfViewer {
     }
 
     const islands = this.buildGeometryIslands(mesh);
+    let hasHiddenIsland = false;
     for (const island of islands) {
       const id = `${nodeId}:${island.materialIndex}:${island.islandIndex}`;
+      const hidden =
+        this.indexingHiddenStates?.get(id) ?? this.savedIslandHidden(nodeId, island.materialIndex, island.islandIndex);
+      hasHiddenIsland ||= hidden;
       this.geometryIslands.set(id, {
         info: {
           id,
@@ -769,11 +1537,15 @@ export class GltfViewer {
           islandCount: island.islandCount,
           faceCount: island.faceCount,
           vertexCount: island.vertexCount,
-          hidden: false
+          hidden
         },
         mesh,
         triangleOffsets: island.triangleOffsets
       });
+    }
+
+    if (hasHiddenIsland) {
+      this.rebuildHiddenGeometry(mesh);
     }
   }
 
@@ -1036,6 +1808,15 @@ export class GltfViewer {
     group.quaternion.copy(mesh.quaternion);
     group.scale.copy(mesh.scale);
     this.islandHighlight = group;
+    this.islandHighlightMesh = mesh;
+  }
+
+  private updateIslandHighlightTransform(): void {
+    if (!this.islandHighlight || !this.islandHighlightMesh) return;
+
+    this.islandHighlight.position.copy(this.islandHighlightMesh.position);
+    this.islandHighlight.quaternion.copy(this.islandHighlightMesh.quaternion);
+    this.islandHighlight.scale.copy(this.islandHighlightMesh.scale);
   }
 
   private rebuildHiddenGeometry(mesh: Mesh): void {
@@ -1173,6 +1954,7 @@ export class GltfViewer {
       }
     });
     this.islandHighlight = undefined;
+    this.islandHighlightMesh = undefined;
   }
 
   private clearHighlights(): void {

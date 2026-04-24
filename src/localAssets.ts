@@ -4,6 +4,10 @@ type FileSystemFileHandleLike = {
   kind: "file";
   name: string;
   getFile(): Promise<File>;
+  createWritable?: () => Promise<{
+    write(data: BlobPart): Promise<void>;
+    close(): Promise<void>;
+  }>;
   queryPermission?: (descriptor?: { mode?: "read" | "readwrite" }) => Promise<PermissionState>;
   requestPermission?: (descriptor?: { mode?: "read" | "readwrite" }) => Promise<PermissionState>;
 };
@@ -201,6 +205,48 @@ export class LocalAssetLibrary {
     });
   }
 
+  async writeAssetText(asset: LocalAsset, text: string): Promise<LocalAsset> {
+    return this.writeAssetData(asset, text);
+  }
+
+  async writeAssetBlob(asset: LocalAsset, blob: Blob): Promise<LocalAsset> {
+    return this.writeAssetData(asset, blob);
+  }
+
+  private async writeAssetData(asset: LocalAsset, data: BlobPart): Promise<LocalAsset> {
+    if (asset.accessMode !== "handle" || !asset.fileHandle) {
+      throw new Error("This file was imported without an editable file handle. Open it with Open editable folder or Open files first.");
+    }
+
+    const handle = asset.fileHandle as FileSystemFileHandleLike;
+    const permission = await this.ensureFilePermission(handle);
+    if (permission !== "granted") {
+      throw new Error("Write permission was not granted for this file.");
+    }
+
+    const writable = await handle.createWritable?.();
+    if (!writable) {
+      throw new Error("This browser did not provide a writable file stream for the selected file.");
+    }
+
+    await writable.write(data);
+    await writable.close();
+
+    const updatedFile = await handle.getFile();
+    this.addFile(updatedFile, asset.path, {
+      fileHandle: handle,
+      directoryHandle: asset.directoryHandle,
+      accessMode: "handle"
+    });
+    this.revokeObjectUrls();
+
+    const updatedAsset = this.assets.find((item) => item.path === asset.path);
+    if (!updatedAsset) {
+      throw new Error("The saved file could not be re-indexed.");
+    }
+    return updatedAsset;
+  }
+
   addFileList(fileList: FileList | File[]): number {
     const files = Array.from(fileList);
     for (const file of files) {
@@ -321,6 +367,13 @@ export class LocalAssetLibrary {
     this.objectUrls.set(key, url);
     record.url = url;
     return url;
+  }
+
+  private async ensureFilePermission(handle: FileSystemFileHandleLike): Promise<PermissionState> {
+    const descriptor = { mode: "readwrite" as const };
+    const current = await handle.queryPermission?.(descriptor);
+    if (current === "granted") return "granted";
+    return (await handle.requestPermission?.(descriptor)) ?? "denied";
   }
 
   private async collectDirectoryHandle(

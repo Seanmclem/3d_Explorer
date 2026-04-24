@@ -55,6 +55,7 @@ export type NodeInspectorInfo = {
   depth: number;
   name: string;
   type: string;
+  deleted: boolean;
   visible: boolean;
   childCount: number;
   tags: string[];
