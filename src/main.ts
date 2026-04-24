@@ -39,6 +39,10 @@ if (!app) {
 app.innerHTML = `
   <main class="shell">
     <aside class="library-panel" aria-label="Asset library">
+      <div class="panel-dock-header">
+        <strong>Files</strong>
+        <button id="toggleLibraryPanel" type="button" aria-pressed="true">Hide files</button>
+      </div>
       <section class="accordion-section intro" data-accordion="overview">
         <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-overview">
           <span>Overview</span>
@@ -96,6 +100,8 @@ app.innerHTML = `
 
     <section class="viewport-region" aria-label="3D viewport">
       <canvas id="viewerCanvas"></canvas>
+      <button class="edge-dock-toggle edge-dock-toggle-left" id="showLibraryPanel" type="button" hidden>Show files</button>
+      <button class="edge-dock-toggle edge-dock-toggle-right" id="showInspectorPanel" type="button" hidden>Show inspector</button>
 
       <div class="status-chip" id="statusChip">Ready</div>
 
@@ -114,6 +120,10 @@ app.innerHTML = `
 
       <div class="panel-resizer panel-resizer-right" id="rightPanelResizer" aria-hidden="true"></div>
       <aside class="inspector-panel" aria-label="Model inspector">
+        <div class="panel-dock-header">
+          <strong>Inspector</strong>
+          <button id="toggleInspectorPanel" type="button" aria-pressed="true">Hide inspector</button>
+        </div>
         <section class="accordion-section" data-accordion="selected">
           <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-selected">
             <span>Selected</span>
@@ -255,11 +265,16 @@ const viewer = new GltfViewer({
   }
 });
 const TIMELINE_FPS = 24;
+const COLLAPSED_SIDE_PANEL_WIDTH = 52;
 
 const pickFolderButton = query<HTMLButtonElement>("#pickFolder");
 const pickFilesButton = query<HTMLButtonElement>("#pickFiles");
 const toggleLibraryButton = query<HTMLButtonElement>("#toggleLibrary");
 const toggleInspectorButton = query<HTMLButtonElement>("#toggleInspector");
+const toggleLibraryPanelButton = query<HTMLButtonElement>("#toggleLibraryPanel");
+const toggleInspectorPanelButton = query<HTMLButtonElement>("#toggleInspectorPanel");
+const showLibraryPanelButton = query<HTMLButtonElement>("#showLibraryPanel");
+const showInspectorPanelButton = query<HTMLButtonElement>("#showInspectorPanel");
 const folderInput = query<HTMLInputElement>("#folderInput");
 const fileInput = query<HTMLInputElement>("#fileInput");
 const clearLibraryButton = query<HTMLButtonElement>("#clearLibrary");
@@ -408,6 +423,26 @@ toggleLibraryButton.addEventListener("click", () => {
 
 toggleInspectorButton.addEventListener("click", () => {
   inspectorVisible = !inspectorVisible;
+  applyLayoutState();
+});
+
+toggleLibraryPanelButton.addEventListener("click", () => {
+  libraryVisible = !libraryVisible;
+  applyLayoutState();
+});
+
+toggleInspectorPanelButton.addEventListener("click", () => {
+  inspectorVisible = !inspectorVisible;
+  applyLayoutState();
+});
+
+showLibraryPanelButton.addEventListener("click", () => {
+  libraryVisible = true;
+  applyLayoutState();
+});
+
+showInspectorPanelButton.addEventListener("click", () => {
+  inspectorVisible = true;
   applyLayoutState();
 });
 
@@ -1852,16 +1887,35 @@ function renderTimelineDockVisibility(): void {
 
 function applyLayoutState(): void {
   shell.style.setProperty("--library-resizer-width", libraryVisible ? "8px" : "0px");
-  shell.style.setProperty("--library-width", libraryVisible ? `${libraryWidth}px` : "0px");
-  dropTarget.style.setProperty("--inspector-width", inspectorVisible ? `${inspectorWidth}px` : "0px");
+  shell.style.setProperty(
+    "--library-width",
+    libraryVisible ? `${libraryWidth}px` : `${COLLAPSED_SIDE_PANEL_WIDTH}px`
+  );
+  dropTarget.style.setProperty(
+    "--inspector-width",
+    inspectorVisible ? `${inspectorWidth}px` : `${COLLAPSED_SIDE_PANEL_WIDTH}px`
+  );
   dropTarget.style.setProperty("--timeline-dock-height", `${timelineDockHeight}px`);
 
   shell.classList.toggle("library-hidden", !libraryVisible);
   dropTarget.classList.toggle("inspector-hidden", !inspectorVisible);
   dropTarget.classList.toggle("timeline-dock-open", timelineDockVisible);
 
+  toggleLibraryButton.textContent = libraryVisible ? "Hide files" : "Show files";
+  toggleInspectorButton.textContent = inspectorVisible ? "Hide inspector" : "Show inspector";
   toggleLibraryButton.setAttribute("aria-pressed", String(libraryVisible));
   toggleInspectorButton.setAttribute("aria-pressed", String(inspectorVisible));
+  toggleLibraryPanelButton.textContent = libraryVisible ? "Hide files" : "Show";
+  toggleInspectorPanelButton.textContent = inspectorVisible ? "Hide inspector" : "Show";
+  toggleLibraryPanelButton.setAttribute("aria-pressed", String(libraryVisible));
+  toggleInspectorPanelButton.setAttribute("aria-pressed", String(inspectorVisible));
+  toggleLibraryPanelButton.setAttribute("aria-label", libraryVisible ? "Hide files" : "Show files");
+  toggleInspectorPanelButton.setAttribute(
+    "aria-label",
+    inspectorVisible ? "Hide inspector" : "Show inspector"
+  );
+  showLibraryPanelButton.hidden = true;
+  showInspectorPanelButton.hidden = true;
 
   leftPanelResizer.hidden = !libraryVisible;
   rightPanelResizer.hidden = !inspectorVisible;

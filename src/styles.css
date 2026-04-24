@@ -46,14 +46,18 @@ button:disabled {
 
 .shell {
   --library-width: 320px;
-  --library-resizer-width: 8px;
-  display: grid;
-  grid-template-columns: minmax(0, var(--library-width)) var(--library-resizer-width) minmax(0, 1fr);
+  position: relative;
   height: 100vh;
+  padding-left: var(--library-width);
   background: #101210;
 }
 
 .library-panel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--library-width);
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -61,11 +65,57 @@ button:disabled {
   border-right: 1px solid #2f3933;
   background: #151915;
   overflow: auto;
+  z-index: 6;
 }
 
 .shell.library-hidden .library-panel {
-  border-right: 0;
   overflow: hidden;
+}
+
+.shell.library-hidden .library-panel > :not(.panel-dock-header) {
+  display: none;
+}
+
+.shell.library-hidden .library-panel > .panel-dock-header {
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 8px 6px;
+  border-right: 1px solid #2f3933;
+  border-bottom: 0;
+}
+
+.shell.library-hidden .library-panel > .panel-dock-header strong {
+  display: none;
+}
+
+.shell.library-hidden .library-panel > .panel-dock-header button {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 4px;
+  font-size: 0.72rem;
+}
+
+.panel-dock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #2f3933;
+  background: #111512;
+}
+
+.panel-dock-header strong {
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.panel-dock-header button {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
 }
 
 .panel-resizer {
@@ -112,6 +162,11 @@ button:disabled {
 }
 
 .panel-resizer-left {
+  position: absolute;
+  top: 0;
+  left: calc(var(--library-width) - 4px);
+  bottom: 0;
+  width: 8px;
   cursor: col-resize;
 }
 
@@ -142,6 +197,25 @@ button:disabled {
 
 .viewport-region:not(.timeline-dock-open) .panel-resizer-bottom {
   display: none;
+}
+
+.edge-dock-toggle {
+  position: absolute;
+  top: 50%;
+  z-index: 4;
+  min-height: 40px;
+  padding: 8px 10px;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: translateY(-50%);
+}
+
+.edge-dock-toggle-left {
+  left: 12px;
+}
+
+.edge-dock-toggle-right {
+  right: 12px;
 }
 
 .accordion-section {
@@ -376,12 +450,18 @@ h3 {
   --inspector-width: 320px;
   --timeline-dock-height: 330px;
   position: relative;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  background: #101210;
+  isolation: isolate;
 }
 
 #viewerCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -399,7 +479,7 @@ h3 {
   position: absolute;
   top: 16px;
   left: 18px;
-  z-index: 3;
+  z-index: 5;
   max-width: min(520px, calc(100% - var(--inspector-width) - 60px));
   border: 1px solid #3d4942;
   border-radius: 8px;
@@ -427,7 +507,7 @@ h3 {
   right: calc(var(--inspector-width) + 20px);
   top: 16px;
   display: flex;
-  z-index: 3;
+  z-index: 5;
   max-width: calc(100% - var(--inspector-width) - 60px);
   flex-wrap: wrap;
   gap: 8px;
@@ -455,7 +535,7 @@ h3 {
   backdrop-filter: blur(10px);
   overflow: auto;
   transition: bottom 180ms ease;
-  z-index: 2;
+  z-index: 4;
 }
 
 .viewport-region.timeline-dock-open .inspector-panel {
@@ -463,9 +543,30 @@ h3 {
 }
 
 .viewport-region.inspector-hidden .inspector-panel {
-  width: 0;
-  border-left: 0;
   overflow: hidden;
+}
+
+.viewport-region.inspector-hidden .inspector-panel > :not(.panel-dock-header) {
+  display: none;
+}
+
+.viewport-region.inspector-hidden .inspector-panel > .panel-dock-header {
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 8px 6px;
+  border-left: 1px solid #2f3933;
+  border-bottom: 0;
+}
+
+.viewport-region.inspector-hidden .inspector-panel > .panel-dock-header strong {
+  display: none;
+}
+
+.viewport-region.inspector-hidden .inspector-panel > .panel-dock-header button {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 4px;
+  font-size: 0.72rem;
 }
 
 .timeline-dock {
@@ -481,7 +582,7 @@ h3 {
   background: rgba(15, 18, 17, 0.96);
   backdrop-filter: blur(12px);
   transition: height 180ms ease;
-  z-index: 2;
+  z-index: 4;
 }
 
 .timeline-dock.is-collapsed {
@@ -792,12 +893,14 @@ h3 {
 .timeline-key-button {
   position: absolute;
   top: 50%;
-  width: 14px;
-  height: 14px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
   border: 0;
   border-radius: 0;
   padding: 0;
   background: transparent;
+  cursor: pointer;
   transform: translate(-50%, -50%);
 }
 
