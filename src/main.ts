@@ -922,44 +922,65 @@ function renderEditorTools(): HTMLElement {
   editorTools.className = "editor-tool-strip";
   const canSaveGltf = currentAsset?.kind === "gltf";
   const canOverrideGlb = currentAsset?.kind === "glb" && currentAsset.accessMode === "handle";
+  const saveModeLabel =
+    currentAsset?.kind === "gltf" ? "Overwrite glTF" : currentAsset?.kind === "glb" ? "Overwrite GLB" : "Export only";
   editorTools.innerHTML = `
-    <div class="tool-group" aria-label="File actions">
-      <button class="save-gltf-button" type="button" data-export-glb>Export GLB</button>
-      <button
-        class="save-gltf-button"
-        type="button"
-        data-override-glb
-        ${canOverrideGlb ? "" : "disabled"}
-        title="${
-          canOverrideGlb
-            ? "Overwrite the original .glb with the current visible preview"
-            : "Open an editable .glb file to overwrite it directly"
-        }"
-      >Override GLB</button>
-      <button
-        class="save-gltf-button"
-        type="button"
-        data-save-gltf
-        ${canSaveGltf ? "" : "disabled"}
-        title="${canSaveGltf ? "Overwrite the current .gltf with the current visible preview" : "Open an editable .gltf file to overwrite it directly"}"
-      >Override glTF</button>
-      <button type="button" data-history-action="undo">Undo</button>
-      <button type="button" data-history-action="redo">Redo</button>
+    <div class="tool-cluster">
+      <div class="tool-cluster-header">
+        <span class="tool-cluster-title">Save</span>
+        <span class="tool-cluster-note">${saveModeLabel}</span>
+      </div>
+      <div class="tool-group tool-grid tool-grid-files" aria-label="File actions">
+        <button class="save-gltf-button" type="button" data-export-glb>Export GLB</button>
+        <button
+          class="save-gltf-button"
+          type="button"
+          data-override-glb
+          ${canOverrideGlb ? "" : "disabled"}
+          title="${
+            canOverrideGlb
+              ? "Overwrite the original .glb with the current visible preview"
+              : "Open an editable .glb file to overwrite it directly"
+          }"
+        >Override GLB</button>
+        <button
+          class="save-gltf-button"
+          type="button"
+          data-save-gltf
+          ${canSaveGltf ? "" : "disabled"}
+          title="${canSaveGltf ? "Overwrite the current .gltf with the current visible preview" : "Open an editable .gltf file to overwrite it directly"}"
+        >Override glTF</button>
+      </div>
     </div>
-    <div class="tool-group" aria-label="Editor modes">
-      ${["select", "move", "rotate", "scale", "material"]
-        .map(
-          (mode) => `
-            <button type="button" data-editor-mode="${mode}" aria-pressed="${editorMode === mode}">${modeLabel(mode)}</button>
-          `
-        )
-        .join("")}
+    <div class="tool-cluster">
+      <div class="tool-cluster-header">
+        <span class="tool-cluster-title">Edit</span>
+        <div class="tool-group tool-group-inline" aria-label="History controls">
+          <button type="button" data-history-action="undo">Undo</button>
+          <button type="button" data-history-action="redo">Redo</button>
+        </div>
+      </div>
+      <div class="tool-group tool-grid tool-grid-modes" aria-label="Editor modes">
+        ${["select", "move", "rotate", "scale", "material"]
+          .map(
+            (mode) => `
+              <button type="button" data-editor-mode="${mode}" aria-pressed="${editorMode === mode}">${modeLabel(mode)}</button>
+            `
+          )
+          .join("")}
+      </div>
     </div>
-    <div class="tool-group add-shape-strip" aria-label="Add shapes">
-      <button type="button" data-add-primitive="cube">Cube</button>
-      <button type="button" data-add-primitive="sphere">Sphere</button>
-      <button type="button" data-add-primitive="plane">Plane</button>
-      <button type="button" data-add-primitive="light">Light</button>
+    <div class="tool-cluster">
+      <div class="tool-cluster-header">
+        <span class="tool-cluster-title">Add</span>
+        <span class="tool-cluster-note">New scene objects</span>
+      </div>
+      <div class="tool-group tool-grid tool-grid-shapes add-shape-strip" aria-label="Add shapes">
+        <button type="button" data-add-primitive="cube">Cube</button>
+        <button type="button" data-add-primitive="sphere">Sphere</button>
+        <button type="button" data-add-primitive="plane">Plane</button>
+        <button type="button" data-add-primitive="light">Light</button>
+      </div>
     </div>
   `;
   return editorTools;
