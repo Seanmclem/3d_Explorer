@@ -643,7 +643,8 @@ export class GltfViewer {
     const result = await exporter.parseAsync(root, {
       binary: true,
       onlyVisible: true,
-      includeCustomExtensions: true
+      includeCustomExtensions: true,
+      animations: this.clips
     });
 
     if (!(result instanceof ArrayBuffer)) {
@@ -663,7 +664,8 @@ export class GltfViewer {
     const result = await exporter.parseAsync(root, {
       binary: false,
       onlyVisible: true,
-      includeCustomExtensions: true
+      includeCustomExtensions: true,
+      animations: this.clips
     });
 
     if (!result || typeof result !== "object" || result instanceof ArrayBuffer) {
