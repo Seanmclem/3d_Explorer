@@ -224,6 +224,7 @@ export class GltfViewer {
   private clips: AnimationClip[] = [];
   private activeAction?: AnimationAction;
   private activeClipIndex = -1;
+  private currentClipTime = 0;
   private playbackSpeed = 1;
   private editorMode: EditorMode = "select";
   private selectedObject?: Object3D;
@@ -611,19 +612,21 @@ export class GltfViewer {
 
     this.mixer.stopAllAction();
     this.activeClipIndex = index;
+    this.currentClipTime = 0;
     this.activeAction = this.mixer.clipAction(this.clips[index]);
     this.activeAction.reset();
     this.activeAction.paused = this.paused;
     this.activeAction.play();
+    this.applyPlaybackTime(0);
     this.clock.getDelta();
     this.emitPlayback();
   }
 
   scrub(time: number): void {
-    if (!this.mixer || this.activeClipIndex < 0) return;
+    if (!this.activeAction || this.activeClipIndex < 0) return;
     const clip = this.clips[this.activeClipIndex];
     const nextTime = Math.min(Math.max(time, 0), clip.duration);
-    this.mixer.setTime(nextTime);
+    this.applyPlaybackTime(nextTime);
     this.emitPlayback(nextTime);
   }
 
@@ -732,8 +735,13 @@ export class GltfViewer {
     this.controls.update();
 
     if (this.mixer && !this.paused) {
-      this.mixer.update(delta * this.playbackSpeed);
-      this.emitPlayback();
+      const clip = this.activeClipIndex >= 0 ? this.clips[this.activeClipIndex] : undefined;
+      const duration = clip?.duration ?? 0;
+      if (duration > 0) {
+        this.currentClipTime = (this.currentClipTime + delta * this.playbackSpeed) % duration;
+        this.applyPlaybackTime(this.currentClipTime);
+        this.emitPlayback(this.currentClipTime);
+      }
     }
 
     this.updateIslandHighlightTransform();
@@ -758,6 +766,7 @@ export class GltfViewer {
     this.clips = [];
     this.activeAction = undefined;
     this.activeClipIndex = -1;
+    this.currentClipTime = 0;
     this.selectedObject = undefined;
     this.transformStart = undefined;
     this.undoStack.length = 0;
@@ -2187,12 +2196,29 @@ export class GltfViewer {
     this.controls.update();
   }
 
+  private applyPlaybackTime(time: number): void {
+    if (!this.mixer || !this.activeAction || this.activeClipIndex < 0) return;
+
+    const clip = this.clips[this.activeClipIndex];
+    const clampedTime = Math.min(Math.max(time, 0), clip?.duration ?? 0);
+    const paused = this.activeAction.paused;
+    const previousTimeScale = this.mixer.timeScale;
+    this.currentClipTime = clampedTime;
+    this.activeAction.paused = false;
+    this.activeAction.enabled = true;
+    this.activeAction.setEffectiveWeight(1);
+    this.mixer.timeScale = 1;
+    this.mixer.setTime(clampedTime);
+    this.mixer.timeScale = previousTimeScale;
+    this.activeAction.paused = paused;
+  }
+
   private emitPlayback(explicitTime?: number): void {
     if (!this.onPlayback) return;
 
     const clip = this.activeClipIndex >= 0 ? this.clips[this.activeClipIndex] : undefined;
     const duration = clip?.duration ?? 0;
-    const time = explicitTime ?? (duration > 0 && this.mixer ? this.mixer.time % duration : 0);
+    const time = explicitTime ?? (duration > 0 ? this.currentClipTime : 0);
 
     this.onPlayback({
       activeClipIndex: this.activeClipIndex,

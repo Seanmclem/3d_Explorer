@@ -92,6 +92,7 @@ app.innerHTML = `
         </div>
       </section>
     </aside>
+    <div class="panel-resizer panel-resizer-left" id="leftPanelResizer" aria-hidden="true"></div>
 
     <section class="viewport-region" aria-label="3D viewport">
       <canvas id="viewerCanvas"></canvas>
@@ -99,16 +100,19 @@ app.innerHTML = `
       <div class="status-chip" id="statusChip">Ready</div>
 
       <div class="toolbar" aria-label="Viewport controls">
+        <button id="toggleLibrary" type="button" aria-pressed="true">Files</button>
         <button id="resetCamera" type="button">Fit</button>
         <button id="toggleRotate" type="button" aria-pressed="false">Rotate</button>
         <button id="togglePan" type="button" aria-pressed="false">Pan</button>
         <button id="toggleGrid" type="button" aria-pressed="true">Grid</button>
         <button id="toggleBounds" type="button" aria-pressed="true">Bounds</button>
         <button id="toggleWireframe" type="button" aria-pressed="false">Wire</button>
+        <button id="toggleInspector" type="button" aria-pressed="true">Inspector</button>
         <button id="toggleTimelineDockTop" type="button" aria-pressed="true">Timeline</button>
         <button id="capturePng" type="button">PNG</button>
       </div>
 
+      <div class="panel-resizer panel-resizer-right" id="rightPanelResizer" aria-hidden="true"></div>
       <aside class="inspector-panel" aria-label="Model inspector">
         <section class="accordion-section" data-accordion="selected">
           <button class="accordion-header" type="button" aria-expanded="true" aria-controls="accordion-selected">
@@ -160,6 +164,7 @@ app.innerHTML = `
         </section>
       </aside>
 
+      <div class="panel-resizer panel-resizer-bottom" id="timelineResizer" aria-hidden="true"></div>
       <section class="timeline-dock" id="timelineDock" aria-label="Animation timeline">
         <div class="timeline-dock-header">
           <div class="timeline-transport">
@@ -184,6 +189,7 @@ app.innerHTML = `
             <span class="section-title">Clip</span>
             <strong id="activeClipName">No animation</strong>
             <span id="trackSummary">Open a model with animation clips to inspect channels and keys.</span>
+            <span id="keyframeSummary">Select a keyframe to inspect its frame and track.</span>
           </div>
           <label class="timeline-speed-control" for="speed">
             <span class="field-label">Playback speed</span>
@@ -252,6 +258,8 @@ const TIMELINE_FPS = 24;
 
 const pickFolderButton = query<HTMLButtonElement>("#pickFolder");
 const pickFilesButton = query<HTMLButtonElement>("#pickFiles");
+const toggleLibraryButton = query<HTMLButtonElement>("#toggleLibrary");
+const toggleInspectorButton = query<HTMLButtonElement>("#toggleInspector");
 const folderInput = query<HTMLInputElement>("#folderInput");
 const fileInput = query<HTMLInputElement>("#fileInput");
 const clearLibraryButton = query<HTMLButtonElement>("#clearLibrary");
@@ -268,6 +276,7 @@ const nodeList = query<HTMLElement>("#nodeList");
 const clipList = query<HTMLElement>("#clipList");
 const animationSummary = query<HTMLElement>("#animationSummary");
 const activeClipName = query<HTMLElement>("#activeClipName");
+const keyframeSummary = query<HTMLElement>("#keyframeSummary");
 const togglePlayButton = query<HTMLButtonElement>("#togglePlay");
 const toggleTimelineDockButton = query<HTMLButtonElement>("#toggleTimelineDock");
 const toggleTimelineDockTopButton = query<HTMLButtonElement>("#toggleTimelineDockTop");
@@ -287,11 +296,35 @@ const jumpStartButton = query<HTMLButtonElement>("#jumpStart");
 const stepBackButton = query<HTMLButtonElement>("#stepBack");
 const stepForwardButton = query<HTMLButtonElement>("#stepForward");
 const jumpEndButton = query<HTMLButtonElement>("#jumpEnd");
+const shell = query<HTMLElement>(".shell");
+const leftPanelResizer = query<HTMLElement>("#leftPanelResizer");
+const rightPanelResizer = query<HTMLElement>("#rightPanelResizer");
+const timelineResizer = query<HTMLElement>("#timelineResizer");
+
+type SelectedKeyframeInfo = {
+  clipId: string;
+  trackId: string;
+  targetLabel: string;
+  propertyLabel: string;
+  bindingPath: string;
+  interpolation: string;
+  valueType: string;
+  time: number;
+  frame: number;
+  keyIndex: number;
+  keyCount: number;
+};
 
 let selectedAssetId = "";
 let currentAsset: LocalAsset | null = null;
 let timelineDockVisible = true;
 let timelineClips: AnimationTimelineClip[] = [];
+let libraryVisible = true;
+let inspectorVisible = true;
+let libraryWidth = 320;
+let inspectorWidth = 320;
+let timelineDockHeight = 330;
+let selectedKeyframe: SelectedKeyframeInfo | null = null;
 let currentPlayback: PlaybackState = {
   activeClipIndex: -1,
   clipName: "No animation",
@@ -302,6 +335,7 @@ let currentPlayback: PlaybackState = {
 let isScrubbing = false;
 
 initAccordions();
+applyLayoutState();
 
 if (supportsDirectoryPicker()) {
   pickFolderButton.title = "Uses the File System Access API and keeps file handles for future edits.";
@@ -357,6 +391,7 @@ clearLibraryButton.addEventListener("click", () => {
   openDetailState.clear();
   currentGeometrySelection = null;
   selectedNodeId = null;
+  selectedKeyframe = null;
   selectedName.textContent = "No model loaded";
   selectedPath.textContent = "Pick a GLB or glTF file to begin.";
   renderAssets();
@@ -364,6 +399,37 @@ clearLibraryButton.addEventListener("click", () => {
   renderNodes([]);
   renderClips([]);
   setStatus({ label: "Library cleared", tone: "idle" });
+});
+
+toggleLibraryButton.addEventListener("click", () => {
+  libraryVisible = !libraryVisible;
+  applyLayoutState();
+});
+
+toggleInspectorButton.addEventListener("click", () => {
+  inspectorVisible = !inspectorVisible;
+  applyLayoutState();
+});
+
+bindPanelResizer(leftPanelResizer, "horizontal", (event) => {
+  const rect = shell.getBoundingClientRect();
+  libraryWidth = clamp(event.clientX - rect.left, 240, 520);
+  libraryVisible = true;
+  applyLayoutState();
+});
+
+bindPanelResizer(rightPanelResizer, "horizontal", (event) => {
+  const rect = dropTarget.getBoundingClientRect();
+  inspectorWidth = clamp(rect.right - event.clientX, 260, 520);
+  inspectorVisible = true;
+  applyLayoutState();
+});
+
+bindPanelResizer(timelineResizer, "vertical", (event) => {
+  const rect = dropTarget.getBoundingClientRect();
+  timelineDockHeight = clamp(rect.bottom - event.clientY, 180, Math.max(260, Math.round(rect.height * 0.72)));
+  timelineDockVisible = true;
+  applyLayoutState();
 });
 
 assetSearch.addEventListener("input", renderAssets);
@@ -899,6 +965,7 @@ async function loadAsset(asset: LocalAsset): Promise<void> {
 function renderLoadedModel(model: LoadedModel): void {
   loadedNodes = model.nodes;
   selectedNodeId = null;
+  selectedKeyframe = null;
   viewer.selectNode(null);
   nodeVisibilityOverrides.clear();
   deletedNodeOverrides.clear();
@@ -1693,6 +1760,7 @@ function renderClips(clips: AnimationTimelineClip[]): void {
   if (clips.length === 0) {
     animationSummary.textContent = "No animation clips loaded.";
     activeClipName.textContent = "No animation";
+    keyframeSummary.textContent = "Select a keyframe to inspect its frame and track.";
     clipList.innerHTML = `<div class="empty-state compact">No animation clips in this model.</div>`;
     trackGroupList.innerHTML = `<div class="empty-state compact">The active clip’s animated channels and keyframes appear here.</div>`;
     trackSummary.textContent = "Open a model with animation clips to inspect channels and keys.";
@@ -1769,18 +1837,37 @@ function updatePlayback(state: PlaybackState): void {
 
 function setTimelineDockVisible(visible: boolean): void {
   timelineDockVisible = visible;
-  renderTimelineDockVisibility();
+  applyLayoutState();
 }
 
 function renderTimelineDockVisibility(): void {
   timelineDock.classList.toggle("is-collapsed", !timelineDockVisible);
-  dropTarget.classList.toggle("timeline-dock-open", timelineDockVisible);
 
   const label = timelineDockVisible ? "Hide timeline" : "Show timeline";
   for (const button of [toggleTimelineDockButton, toggleTimelineDockTopButton, toggleTimelineDockSideButton]) {
     button.setAttribute("aria-pressed", String(timelineDockVisible));
     button.textContent = button === toggleTimelineDockTopButton ? "Timeline" : label;
   }
+}
+
+function applyLayoutState(): void {
+  shell.style.setProperty("--library-resizer-width", libraryVisible ? "8px" : "0px");
+  shell.style.setProperty("--library-width", libraryVisible ? `${libraryWidth}px` : "0px");
+  dropTarget.style.setProperty("--inspector-width", inspectorVisible ? `${inspectorWidth}px` : "0px");
+  dropTarget.style.setProperty("--timeline-dock-height", `${timelineDockHeight}px`);
+
+  shell.classList.toggle("library-hidden", !libraryVisible);
+  dropTarget.classList.toggle("inspector-hidden", !inspectorVisible);
+  dropTarget.classList.toggle("timeline-dock-open", timelineDockVisible);
+
+  toggleLibraryButton.setAttribute("aria-pressed", String(libraryVisible));
+  toggleInspectorButton.setAttribute("aria-pressed", String(inspectorVisible));
+
+  leftPanelResizer.hidden = !libraryVisible;
+  rightPanelResizer.hidden = !inspectorVisible;
+  timelineResizer.hidden = !timelineDockVisible;
+
+  renderTimelineDockVisibility();
 }
 
 function renderTimelineDetails(): void {
@@ -1794,6 +1881,11 @@ function renderTimelineDetails(): void {
     timelineClips[0];
   const activeDuration = Math.max(activeClip.duration, 0.001);
   activeClipName.textContent = activeClip.name;
+  if (!selectedKeyframe || selectedKeyframe.clipId !== activeClip.id) {
+    keyframeSummary.textContent = "Select a keyframe to inspect its frame and track.";
+  } else {
+    keyframeSummary.textContent = describeSelectedKeyframe(selectedKeyframe);
+  }
 
   timelineRuler.append(renderTimelineRuler(activeDuration));
 
@@ -1851,8 +1943,28 @@ function renderTimelineRuler(duration: number): HTMLElement {
 function renderTrackRow(track: AnimationTimelineTrack, duration: number): string {
   const ticks = condensedKeyTimes(track.keyTimes, duration)
     .map(
-      (time) =>
-        `<span class="timeline-key-tick" style="left:${duration <= 0 ? 0 : (time / duration) * 100}%"><span></span></span>`
+      (time) => {
+        const keyIndex = track.keyTimes.findIndex((value) => Math.abs(value - time) < 0.0001);
+        const frame = Math.round(time * TIMELINE_FPS);
+        const selected =
+          selectedKeyframe?.trackId === track.id && Math.abs(selectedKeyframe.time - time) < 0.0001;
+        return `<button
+          class="timeline-key-button${selected ? " is-selected" : ""}"
+          type="button"
+          data-key-track-id="${track.id}"
+          data-key-target="${escapeHtml(track.targetLabel)}"
+          data-key-property="${escapeHtml(track.propertyLabel)}"
+          data-key-binding="${escapeHtml(track.bindingPath)}"
+          data-key-interpolation="${escapeHtml(track.interpolation)}"
+          data-key-value-type="${escapeHtml(track.valueType)}"
+          data-key-time="${time}"
+          data-key-frame="${frame}"
+          data-key-index="${Math.max(0, keyIndex)}"
+          data-key-count="${track.keyCount}"
+          style="left:${duration <= 0 ? 0 : (time / duration) * 100}%"
+          aria-label="Keyframe ${frame} for ${escapeHtml(track.targetLabel)} ${escapeHtml(track.propertyLabel)}"
+        ><span></span></button>`;
+      }
     )
     .join("");
 
@@ -1862,15 +1974,14 @@ function renderTrackRow(track: AnimationTimelineTrack, duration: number): string
         <strong>${escapeHtml(track.targetLabel)} · ${escapeHtml(track.propertyLabel)}</strong>
         <span>${track.keyCount.toLocaleString()} keys · ${escapeHtml(track.interpolation)} · ${escapeHtml(track.valueType)}</span>
       </div>
-      <button
+      <div
         class="timeline-track-rail timeline-scrub-surface"
-        type="button"
         data-scrub-duration="${duration}"
         aria-label="Scrub ${escapeHtml(track.targetLabel)} ${escapeHtml(track.propertyLabel)}"
       >
         ${ticks}
         <span class="timeline-playhead"></span>
-      </button>
+      </div>
     </div>
   `;
 }
@@ -1915,6 +2026,33 @@ function bindTimelineScrubSurfaces(): void {
     surface.addEventListener("pointercancel", stopDragging);
     surface.addEventListener("lostpointercapture", stopDragging);
   }
+
+  for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>(".timeline-key-button"))) {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const time = Number(button.dataset.keyTime ?? 0);
+      selectedKeyframe = {
+        clipId:
+          timelineClips.find((clip) => clip.index === currentPlayback.activeClipIndex)?.id ??
+          `clip-${currentPlayback.activeClipIndex}`,
+        trackId: button.dataset.keyTrackId ?? "",
+        targetLabel: button.dataset.keyTarget ?? "Track",
+        propertyLabel: button.dataset.keyProperty ?? "Value",
+        bindingPath: button.dataset.keyBinding ?? "",
+        interpolation: button.dataset.keyInterpolation ?? "Linear",
+        valueType: button.dataset.keyValueType ?? "value",
+        time,
+        frame: Number(button.dataset.keyFrame ?? 0),
+        keyIndex: Number(button.dataset.keyIndex ?? 0),
+        keyCount: Number(button.dataset.keyCount ?? 0)
+      };
+      keyframeSummary.textContent = describeSelectedKeyframe(selectedKeyframe);
+      viewer.setPaused(true);
+      viewer.scrub(time);
+      renderTimelineDetails();
+      syncTimelinePlayheads();
+    });
+  }
 }
 
 function syncTimelinePlayheads(): void {
@@ -1954,6 +2092,55 @@ function isAnimationGroupOpen(clip: AnimationTimelineClip, group: AnimationTimel
 
 function formatFrame(time: number): string {
   return String(Math.max(0, Math.round(time * TIMELINE_FPS))).padStart(4, "0");
+}
+
+function describeSelectedKeyframe(keyframe: SelectedKeyframeInfo): string {
+  const parts = [
+    `${keyframe.targetLabel} ${keyframe.propertyLabel}`,
+    `frame ${keyframe.frame}`,
+    `${keyframe.time.toFixed(2)}s`,
+    `key ${keyframe.keyIndex + 1}${keyframe.keyCount > 0 ? `/${keyframe.keyCount}` : ""}`,
+    keyframe.interpolation,
+    keyframe.valueType
+  ];
+
+  if (keyframe.bindingPath) {
+    parts.push(keyframe.bindingPath);
+  }
+
+  return parts.join(" · ");
+}
+
+function bindPanelResizer(
+  handle: HTMLElement,
+  axis: "horizontal" | "vertical",
+  onDrag: (event: PointerEvent) => void
+): void {
+  let dragging = false;
+
+  handle.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    handle.setPointerCapture(event.pointerId);
+    onDrag(event);
+  });
+
+  handle.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    onDrag(event);
+  });
+
+  const stopDragging = () => {
+    dragging = false;
+  };
+
+  handle.addEventListener("pointerup", stopDragging);
+  handle.addEventListener("pointercancel", stopDragging);
+  handle.addEventListener("lostpointercapture", stopDragging);
+  handle.dataset.axis = axis;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function wireToggle(selector: string, callback: (enabled: boolean) => void, initial = false): void {
