@@ -2059,6 +2059,10 @@ function bindTimelineScrubSurfaces(): void {
     };
 
     surface.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".timeline-key-button")) {
+        return;
+      }
       dragging = true;
       isScrubbing = true;
       viewer.setPaused(true);
@@ -2082,6 +2086,9 @@ function bindTimelineScrubSurfaces(): void {
   }
 
   for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>(".timeline-key-button"))) {
+    button.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+    });
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       const time = Number(button.dataset.keyTime ?? 0);
